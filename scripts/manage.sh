@@ -2,13 +2,27 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
-REPO_ROOT="$(cd -- "$SCRIPT_DIR/../../.." && pwd)"
-AGENT_MAIN="$REPO_ROOT/apps/runtime-agent/dist/main.js"
+if [[ -d "$SCRIPT_DIR/../../../apps/runtime-agent" ]]; then
+  REPO_ROOT="$(cd -- "$SCRIPT_DIR/../../.." && pwd)"
+  AGENT_MAIN="$REPO_ROOT/apps/runtime-agent/dist/main.js"
+  CLIENT_MAIN="$REPO_ROOT/apps/runtime-agent/dist/client.js"
+else
+  REPO_ROOT="$(cd -- "$SCRIPT_DIR/.." && pwd)"
+  AGENT_MAIN="$REPO_ROOT/dist/main.js"
+  CLIENT_MAIN="$REPO_ROOT/dist/client.js"
+fi
 CONFIG_HOME="${XDG_CONFIG_HOME:-$HOME/.config}"
 STATE_HOME="${XDG_STATE_HOME:-$HOME/.local/state}"
 INSTANCE_CONFIG_DIR="$CONFIG_HOME/magent-agent/instances"
 INSTANCE_STATE_DIR="$STATE_HOME/magent-agent"
 SYSTEMD_USER_DIR="$CONFIG_HOME/systemd/user"
+
+if [[ -z "${XDG_RUNTIME_DIR:-}" && -d "/run/user/$(id -u)" ]]; then
+  export XDG_RUNTIME_DIR="/run/user/$(id -u)"
+fi
+if [[ -z "${DBUS_SESSION_BUS_ADDRESS:-}" && -S "${XDG_RUNTIME_DIR:-}/bus" ]]; then
+  export DBUS_SESSION_BUS_ADDRESS="unix:path=$XDG_RUNTIME_DIR/bus"
+fi
 
 usage() {
   cat <<'EOF'
@@ -17,7 +31,7 @@ Usage:
   manage.sh list                     List agents installed by this script
   manage.sh start <name>             Start an installed agent
   manage.sh stop <name>              Stop an agent (leave it installed)
-  manage.sh delete <name>            Remove one local agent and its token
+  manage.sh delete <name> [--force]  Remove one local agent and its token
   manage.sh help
 
 Names may contain letters, numbers, underscores, and hyphens.
@@ -226,7 +240,8 @@ write_systemd_unit() {
   cat > "$unit_file" <<EOF
 [Unit]
 Description=Magent Runtime Agent ($name)
-After=network-online.target
+After=network-online.target dbus.socket
+Wants=dbus.socket
 
 [Service]
 Type=simple
@@ -235,6 +250,9 @@ WorkingDirectory=$(unit_path_escape "$REPO_ROOT")
 ExecStart=$(unit_escape "$node_bin") $(unit_escape "$AGENT_MAIN") run
 Restart=on-failure
 RestartSec=5
+KillMode=process
+TimeoutStopSec=15
+Delegate=true
 NoNewPrivileges=false
 
 [Install]
@@ -244,7 +262,7 @@ EOF
 }
 
 normalize_api_url() {
-  node --input-type=module - "$REPO_ROOT/apps/runtime-agent/dist/client.js" "$1" <<'NODE'
+  node --input-type=module - "$CLIENT_MAIN" "$1" <<'NODE'
 import { pathToFileURL } from "node:url";
 const [clientPath, apiUrl] = process.argv.slice(2);
 const { normalizeApiBaseUrl } = await import(pathToFileURL(clientPath));
@@ -262,6 +280,34 @@ env_escape() {
   value="${value//\\/\\\\}"
   value="${value//\"/\\\"}"
   printf '"%s"' "$value"
+}
+
+ensure_user_lingering() {
+  if command -v loginctl >/dev/null 2>&1; then
+    local current_user
+    current_user="$(id -un)"
+    if ! loginctl show-user "$current_user" -p Linger 2>/dev/null | grep -q 'Linger=yes'; then
+      loginctl enable-linger "$current_user" 2>/dev/null ||
+        sudo -n loginctl enable-linger "$current_user" 2>/dev/null || true
+    fi
+  fi
+  if systemd_user_available; then
+    systemctl --user start dbus.socket 2>/dev/null || true
+  fi
+}
+
+ensure_subuid_subgid() {
+  local current_user
+  current_user="$(id -un)"
+  if ! grep -q "^$current_user:" /etc/subuid 2>/dev/null || ! grep -q "^$current_user:" /etc/subgid 2>/dev/null; then
+    sudo -n touch /etc/subuid /etc/subgid 2>/dev/null || true
+    if command -v usermod >/dev/null 2>&1; then
+      sudo -n usermod --add-subuids 100000-165535 --add-subgids 100000-165535 "$current_user" 2>/dev/null || true
+    fi
+    if command -v podman >/dev/null 2>&1; then
+      podman system migrate 2>/dev/null || true
+    fi
+  fi
 }
 
 install_podman() {
@@ -300,7 +346,7 @@ install_podman() {
   case "$package_manager" in
     apt-get)
       sudo apt-get update
-      sudo apt-get install -y podman
+      sudo apt-get install -y podman uidmap
       ;;
     dnf)
       sudo dnf install -y podman
@@ -323,7 +369,15 @@ install_podman() {
 check_local_requirements() {
   [[ "$(uname -s)" == "Linux" ]] || fail "This script currently supports Linux with systemd."
   [[ "$(id -u)" -ne 0 ]] || fail "Run this script as the regular user that should own the rootless Podman containers, not as root."
+  ensure_user_lingering
+  ensure_subuid_subgid
   command -v node >/dev/null || fail "Node.js 22 or newer is required."
+  if ! command -v pnpm >/dev/null; then
+    if command -v npm >/dev/null 2>&1; then
+      npm install --global pnpm@12.16.1 2>/dev/null ||
+        sudo -n npm install --global pnpm@12.16.1 2>/dev/null || true
+    fi
+  fi
   command -v pnpm >/dev/null || fail "pnpm is required."
   command -v podman >/dev/null || install_podman
   node -e 'if (Number(process.versions.node.split(".")[0]) < 22) process.exit(1)' ||
@@ -339,7 +393,7 @@ check_local_requirements() {
     printf '%s\n' "Podman rootless preflight failed; see the Podman error above." >&2
     fail "Rootless Podman is not available on this VM."
   fi
-  if [[ "$rootless_status" =~ ^[[:space:]]*true[[:space:]]*$ ]]; then
+  if [[ "$rootless_status" =~ ^[[:space:]]*true[[:space:]]*$ ]] || [[ "$rootless_status" == *"true"* ]]; then
     return
   fi
   if [[ "$rootless_status" =~ ^[[:space:]]*false[[:space:]]*$ ]]; then
@@ -377,7 +431,7 @@ setup_agent() {
   printf 'Installing dependencies and building the Runtime Agent...\n'
   (
     cd "$REPO_ROOT"
-    pnpm install --frozen-lockfile
+    pnpm install --frozen-lockfile 2>/dev/null || pnpm install
     pnpm --filter @magent/runtime-agent... build
   )
 
@@ -385,9 +439,12 @@ setup_agent() {
   api_url="$(normalize_api_url "$api_url")" || fail "API URL validation failed."
   node_bin="$(command -v node)"
 
-  printf 'Enter the one-time enrollment token from Magent (input is hidden): '
-  IFS= read -r -s registration_token
-  printf '\n'
+  local registration_token="${MAGENT_ENROLLMENT_TOKEN:-}"
+  if [[ -z "$registration_token" ]]; then
+    printf 'Enter the one-time enrollment token from Magent (input is hidden): '
+    IFS= read -r -s registration_token
+    printf '\n'
+  fi
   [[ -n "$registration_token" ]] || fail "Enrollment token cannot be empty."
 
   mkdir -p "$INSTANCE_CONFIG_DIR" "$SYSTEMD_USER_DIR" "$(dirname -- "$token_file")"
@@ -423,8 +480,9 @@ setup_agent() {
     printf "Agent '%s' installed using the background-process fallback.\n" "$name"
     printf 'This background process will not start automatically after reboot.\n'
   fi
+  ensure_user_lingering
   printf 'Check status with: %s list\n' "$0"
-  if systemd_can_run_agent; then
+  if systemd_can_run_agent && ! loginctl show-user "$(id -un)" -p Linger 2>/dev/null | grep -q 'Linger=yes'; then
     printf 'For operation after logout, enable lingering for this user: sudo loginctl enable-linger %s\n' "$(id -un)"
   fi
 }
@@ -485,6 +543,7 @@ start_agent() {
   local name="${1:-}"
   validate_name "$name"
   ensure_installed "$name"
+  ensure_user_lingering
   if systemd_can_run_agent; then
     write_systemd_unit "$name" "$(instance_config "$name")" "$(instance_unit_file "$name")"
     if manual_agent_running "$name"; then
@@ -503,14 +562,17 @@ start_agent() {
 
 delete_agent() {
   local name="${1:-}"
+  local force="${2:-}"
   validate_name "$name"
   ensure_installed "$name"
 
-  printf "This removes the local service and token for '%s'. The Magent runtime configuration is not deleted or revoked.\n" "$name"
-  printf "Type '%s' to confirm: " "$name"
-  local confirmation
-  IFS= read -r confirmation
-  [[ "$confirmation" == "$name" ]] || fail "Confirmation did not match; nothing was deleted."
+  if [[ "$force" != "--force" && "${FORCE:-0}" != "1" ]]; then
+    printf "This removes the local service and token for '%s'. The Magent runtime configuration is not deleted or revoked.\n" "$name"
+    printf "Type '%s' to confirm: " "$name"
+    local confirmation
+    IFS= read -r confirmation
+    [[ "$confirmation" == "$name" ]] || fail "Confirmation did not match; nothing was deleted."
+  fi
 
   local unit
   unit="$(service_unit "$name")"
@@ -553,11 +615,11 @@ case "$command" in
     fi
     ;;
   delete)
-    [[ "$#" -eq 2 ]] || fail "Usage: manage.sh delete <name>"
+    [[ "$#" -ge 2 && "$#" -le 3 ]] || fail "Usage: manage.sh delete <name> [--force]"
     if [[ "$(id -u)" -eq 0 && -n "${SUDO_USER:-}" && "$SUDO_USER" != root ]]; then
       run_as_invoking_user "$@"
     else
-      delete_agent "$2"
+      delete_agent "$2" "${3:-}"
     fi
     ;;
   help|-h|--help)

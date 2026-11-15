@@ -176,6 +176,8 @@ export class RuntimeAgent {
     const server = this.mapProxyServer;
     this.mapProxyServer = null;
     if (!server) return;
+    server.closeIdleConnections?.();
+    server.closeAllConnections?.();
     await new Promise<void>((resolve, reject) => {
       server.close((error) => error ? reject(error) : resolve());
     });
