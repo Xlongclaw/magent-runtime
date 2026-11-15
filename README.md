@@ -9,9 +9,12 @@ Requires Node.js 22+ and rootless Podman 4+ on the VM. The API tests mock provid
 From the repository root:
 
 ```sh
+pnpm install --frozen-lockfile
 pnpm --filter @magent/runtime-agent... build
 pnpm --filter @magent/runtime-agent test
 ```
+
+The runtime repository includes the MAP and runtime protocol workspace packages required to build the agent independently of the Magent application monorepo.
 
 ## Enroll and run
 
@@ -21,11 +24,11 @@ Build the agent, configure `MAGENT_API_URL` to the Magent API origin, and set `M
 MAGENT_API_URL=https://magent.example.test \
 MAGENT_AGENT_TOKEN_FILE=/var/lib/magent-agent/agent-token \
 MAGENT_ENROLLMENT_TOKEN='<one-time-token>' \
-node apps/runtime-agent/dist/main.js enroll
+node dist/main.js enroll
 
 MAGENT_API_URL=https://magent.example.test \
 MAGENT_AGENT_TOKEN_FILE=/var/lib/magent-agent/agent-token \
-node apps/runtime-agent/dist/main.js run
+node dist/main.js run
 ```
 
 The enrollment token is single-use. The resulting runtime token is written with owner-only permissions and is never printed. The token file must not already exist before enrollment; choose a fresh path or remove the old token file after revoking the runtime. Production URLs must use HTTPS. HTTP is accepted only for loopback development. Rotate the agent credential by revoking/removing the runtime and enrolling it again.
@@ -34,10 +37,12 @@ The enrollment token is single-use. The resulting runtime token is written with 
 
 `scripts/manage.sh` builds and enrolls one or more local agents. When a systemd user manager is available and Node.js is not installed from Snap, agents run as user services. Without a systemd user manager, or with Snap-based Node.js (whose confinement may prevent systemd from launching it), the script starts a managed background process instead, recording its PID and logs under `~/.local/state/magent-agent/<name>/`; this fallback does not restart automatically after reboot. Run setup as the regular user that owns rootless Podman (not with `sudo`). The `list`, `start`, `stop`, and `delete` commands can also be run with `sudo`; they operate on the invoking user's agents. The script requires Node.js 22+, pnpm, and rootless Podman 4+. If Podman is missing, setup installs it using the distribution package manager (`apt`, `dnf`/`yum`, `zypper`, or `pacman`) via `sudo`; unsupported distributions must install Podman manually. The script verifies that Podman supports rootless mode before continuing.
 
-From the repository root, set up an agent using the API origin and the one-time token generated in the Magent web UI:
+Clone this standalone repository to the VM and set up an agent using the API origin and the one-time token generated in the Magent web UI:
 
 ```sh
-bash apps/runtime-agent/scripts/manage.sh setup workstation https://magent.example.test
+git clone https://github.com/Xlongclaw/magent-runtime.git ~/apps/magent-runtime
+cd ~/apps/magent-runtime
+bash scripts/manage.sh setup workstation https://magent.example.test
 ```
 
 The script installs workspace dependencies, builds the agent, prompts for the enrollment token without echoing it, and starts `magent-agent@workstation.service`. The long-lived token is stored under `~/.local/state/magent-agent/workstation/agent-token` with owner-only permissions. Each setup requires a distinct name and enrollment token.
@@ -45,10 +50,10 @@ The script installs workspace dependencies, builds the agent, prompts for the en
 The Personal Runtime page can generate an SSH login command and the corresponding setup/reconnect commands. SSH is opened by the user from their own terminal; Magent does not receive or store the SSH private key or connect to the VM. The page remembers only the SSH host, user, port, agent name, and API URL in that browser. After generating a one-time enrollment token in the page, run the setup command in the VM's SSH session and enter the token at the hidden prompt.
 
 ```sh
-bash apps/runtime-agent/scripts/manage.sh list
-bash apps/runtime-agent/scripts/manage.sh start workstation
-bash apps/runtime-agent/scripts/manage.sh stop workstation
-bash apps/runtime-agent/scripts/manage.sh delete workstation
+bash scripts/manage.sh list
+bash scripts/manage.sh start workstation
+bash scripts/manage.sh stop workstation
+bash scripts/manage.sh delete workstation
 ```
 
 `start` and `stop` operate on the selected installed agent; when using systemd, `start` refreshes its generated unit before starting it. `stop` leaves its configuration and token installed. These commands work without a systemd user manager by using the background-process fallback. `delete` asks for confirmation, then removes that local agent and token only. It does **not** revoke or remove the server-side runtime, so remove the runtime in the Magent web UI to revoke its credential. Removing it in the UI also clears the runtime's associated control-plane records.
