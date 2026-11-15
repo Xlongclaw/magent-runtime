@@ -837,7 +837,7 @@ function parseByteSize(value: string): number | null {
     : null;
 }
 
-async function runPodmanCommand(
+export async function runPodmanCommand(
   executable: string,
   args: string[],
   options: { timeout: number; maxBuffer: number; input?: string },
@@ -845,8 +845,12 @@ async function runPodmanCommand(
   return new Promise((resolve, reject) => {
     const child = execFileCallback(
       executable,
-      args,
-      { timeout: options.timeout, maxBuffer: options.maxBuffer },
+      ["--remote=false", ...args],
+      {
+        timeout: options.timeout,
+        maxBuffer: options.maxBuffer,
+        env: localPodmanEnvironment(),
+      },
       (error: Error | null, stdout: string, stderr: string) => {
         if (error) {
           const output = [stderr.trim(), stdout.trim()].filter(Boolean).join("\n");
@@ -868,6 +872,14 @@ async function runPodmanCommand(
       child.stdin.end(options.input);
     }
   });
+}
+
+function localPodmanEnvironment(): NodeJS.ProcessEnv {
+  const env = { ...process.env };
+  delete env.CONTAINER_HOST;
+  delete env.CONTAINER_CONNECTION;
+  delete env.DOCKER_HOST;
+  return env;
 }
 
 function isExitCode(error: unknown, code: number): boolean {

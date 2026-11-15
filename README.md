@@ -60,7 +60,7 @@ The Personal Runtime page can generate an SSH login command and the correspondin
 
 ### Rootless Podman troubleshooting
 
-The Runtime Agent must run as the regular VM user, not as root, and requires the VM host to permit unprivileged user namespaces for rootless Podman. Check as that same user:
+The Runtime Agent must run as the regular VM user, not as root, and requires the VM host to permit unprivileged user namespaces for rootless Podman. It uses the VM's local Podman engine, not a remote Podman connection, so secret data can be passed securely over stdin. Check as that same user:
 
 ```sh
 podman info --format '{{.Host.Security.Rootless}}'
@@ -68,17 +68,17 @@ unshare -Ur true
 grep "^$(id -un):" /etc/subuid /etc/subgid
 ```
 
-If Podman reports `false` for rootless mode, check whether it is configured to use a rootful remote connection or whether a connection environment variable is set:
+The manager and Runtime Agent explicitly select local Podman and ignore remote-connection environment variables. A local `podman info` check should report rootless mode:
 
 ```sh
 podman system connection list
 printf 'CONTAINER_HOST=%s\nCONTAINER_CONNECTION=%s\nDOCKER_HOST=%s\n' \
   "${CONTAINER_HOST:+set}" "${CONTAINER_CONNECTION:+set}" "${DOCKER_HOST:+set}"
 env -u CONTAINER_HOST -u CONTAINER_CONNECTION -u DOCKER_HOST \
-  /usr/bin/podman info --format '{{.Host.Security.Rootless}}'
+  /usr/bin/podman --remote=false info --format '{{.Host.Security.Rootless}}'
 ```
 
-The last command should print `true` for the local rootless engine. If it prints `false`, inspect the Podman connection configuration and select/configure a local rootless connection; do not make a rootful connection the workaround. If it fails, follow the error diagnostics below.
+The last command should print `true` for the local rootless engine. If it prints `false`, inspect the local Podman setup; do not use a remote or rootful connection as a workaround. If it fails, follow the error diagnostics below.
 
 If Podman reports a stale pause-process state, and no containers are running for this user, try `podman system migrate` as the agent user, then retry `podman info`. This can stop that user's running containers. Do not use `podman system reset`; it removes Podman data.
 
@@ -148,6 +148,6 @@ podman info --format '{{.Host.Security.Rootless}}'
 
 `Linger=yes` confirms lingering is enabled. Restarting through `manage.sh` refreshes the generated unit when the systemd user manager is available, or uses the managed-process fallback otherwise. Keep the agent and Podman rootless; do not run either with `sudo`.
 
-The cgroup messages are warnings and may not be the cause of an operation failure. If an install fails while creating a secret, use the application's `lastError` after restarting/updating the agent; the agent reports both the beginning and the end of long Podman errors so the actionable failure is not hidden behind the warnings. A later “managed container does not exist” message means the container was never created or the install failed; resolve the original `app.install` error and retry installation before requesting logs or starting the app.
+The cgroup messages are warnings and may not be the cause of an operation failure. The Runtime Agent forces local Podman because remote Podman connections may not forward stdin required by `podman secret create`. If an install fails, use the application's `lastError`; long Podman errors retain both the beginning and end of their output. A later “managed container does not exist” message means the container was never created or the install failed; resolve the original `app.install` error and retry installation before requesting logs or starting the app.
 
 The control plane supports an allowlist of `runtime.inspect` and application lifecycle operations. Queue `runtime.inspect` to collect host CPU, memory, and disk usage and managed-container status/CPU/memory for the runtime dashboard. Install an app using an OCI image reference and the authenticated `/runtimes/applications` API. Rootless Podman launches containers with no network, read-only root filesystems, dropped Linux capabilities, no-new-privileges, CPU/memory/PID limits, a per-app persistent `/data` volume, and a small writable `/tmp`. App configuration uses bounded environment variables; never put secrets in these values. Explicitly granted credentials are retrieved over the authenticated agent connection and mounted as Podman secrets at `/run/secrets/<credential-id>`. Use the app `configure` action to change configuration or grants; it replaces the container while preserving app data. Update keeps the previous image available for rollback; uninstall removes the app's data volume and mounted secrets. No arbitrary command, host path mount, port publishing, or container network access is implemented.

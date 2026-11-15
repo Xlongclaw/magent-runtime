@@ -29,6 +29,10 @@ fail() {
   exit 1
 }
 
+run_local_podman() {
+  env -u CONTAINER_HOST -u CONTAINER_CONNECTION -u DOCKER_HOST podman --remote=false "$@"
+}
+
 validate_name() {
   [[ "${1:-}" =~ ^[a-zA-Z0-9][a-zA-Z0-9_-]{0,31}$ ]] ||
     fail "Agent name must start with a letter or number and contain at most 32 letters, numbers, underscores, or hyphens."
@@ -327,13 +331,13 @@ check_local_requirements() {
   node -e 'if (Number(process.versions.node.split(".")[0]) < 22) process.exit(1)' ||
     fail "Node.js 22 or newer is required."
   local podman_version podman_major
-  podman_version="$(podman version --format '{{.Client.Version}}')" ||
+  podman_version="$(run_local_podman version --format '{{.Client.Version}}')" ||
     fail "Could not determine the Podman version."
   podman_major="${podman_version%%.*}"
   [[ "$podman_major" =~ ^[0-9]+$ && "$podman_major" -ge 4 ]] ||
     fail "Rootless Podman 4 or newer is required."
   local rootless_status
-  if ! rootless_status="$(podman info --format '{{.Host.Security.Rootless}}')"; then
+  if ! rootless_status="$(run_local_podman info --format '{{.Host.Security.Rootless}}')"; then
     printf '%s\n' "Podman rootless preflight failed; see the Podman error above." >&2
     fail "Rootless Podman is not available on this VM."
   fi
@@ -346,7 +350,7 @@ check_local_requirements() {
       "Podman selected a rootful engine for user '$(id -un)'; Magent requires a local rootless engine." \
       "Check 'podman system connection list' for a rootful default connection." \
       "Also check whether CONTAINER_HOST, CONTAINER_CONNECTION, or DOCKER_HOST is set." \
-      "Test local Podman with: env -u CONTAINER_HOST -u CONTAINER_CONNECTION -u DOCKER_HOST /usr/bin/podman info --format '{{.Host.Security.Rootless}}'" \
+      "Test local Podman with: env -u CONTAINER_HOST -u CONTAINER_CONNECTION -u DOCKER_HOST /usr/bin/podman --remote=false info --format '{{.Host.Security.Rootless}}'" \
       "Do not switch to rootful Podman; if the local test fails, diagnose its error before retrying setup." >&2
     fail "Podman is not using a rootless engine."
   fi

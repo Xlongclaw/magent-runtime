@@ -1,7 +1,14 @@
 import assert from "node:assert/strict";
+import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { test } from "node:test";
 import type { ApplicationCommand } from "./client.js";
-import { PodmanApplicationEngine, type PodmanCommandRunner } from "./podman-engine.js";
+import {
+  PodmanApplicationEngine,
+  runPodmanCommand,
+  type PodmanCommandRunner,
+} from "./podman-engine.js";
 
 function command(
   operation: ApplicationCommand["operation"],
@@ -29,6 +36,43 @@ let commandId = 0;
 function exitCodeError(code: number): Error & { code: number } {
   return Object.assign(new Error(`Podman exited with ${code}`), { code });
 }
+
+test("Podman command runner forces local mode and forwards secret stdin", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "mაგენტ-podman-test-"));
+  const executable = join(directory, "podman");
+  await writeFile(
+    executable,
+    '#!/bin/sh\nprintf \'%s|%s|%s|%s\\n\' "${CONTAINER_HOST-unset}" "${CONTAINER_CONNECTION-unset}" "${DOCKER_HOST-unset}" "$*"\ncat\n',
+    { mode: 0o700 },
+  );
+  const previousEnvironment = {
+    CONTAINER_HOST: process.env.CONTAINER_HOST,
+    CONTAINER_CONNECTION: process.env.CONTAINER_CONNECTION,
+    DOCKER_HOST: process.env.DOCKER_HOST,
+  };
+  process.env.CONTAINER_HOST = "ssh://remote.example.test";
+  process.env.CONTAINER_CONNECTION = "remote";
+  process.env.DOCKER_HOST = "tcp://remote.example.test:2375";
+
+  try {
+    const result = await runPodmanCommand(
+      executable,
+      ["secret", "create", "test-secret", "-"],
+      { timeout: 5_000, maxBuffer: 1_024, input: "secret-payload" },
+    );
+    assert.equal(
+      result.stdout,
+      "unset|unset|unset|--remote=false secret create test-secret -\nsecret-payload",
+    );
+    assert.equal(result.stderr, "");
+  } finally {
+    for (const [name, value] of Object.entries(previousEnvironment)) {
+      if (value === undefined) delete process.env[name];
+      else process.env[name] = value;
+    }
+    await rm(directory, { recursive: true, force: true });
+  }
+});
 
 test("Podman lifecycle uses rootless, isolated containers and preserves app storage", async () => {
   const calls: string[][] = [];
