@@ -333,24 +333,15 @@ check_local_requirements() {
   [[ "$podman_major" =~ ^[0-9]+$ && "$podman_major" -ge 4 ]] ||
     fail "Rootless Podman 4 or newer is required."
   local rootless_status
-  if ! rootless_status="$(podman info --format '{{.Host.Security.Rootless}}' 2>&1)"; then
-    printf 'Podman rootless preflight failed:\n%s\n' "$rootless_status" >&2
-    if [[ "$rootless_status" == *newuidmap* || "$rootless_status" == *newgidmap* ||
-      "$rootless_status" == *uid_map* || "$rootless_status" == *gid_map* ]]; then
-      printf '%s\n' \
-        "Podman could not configure the rootless UID/GID mapping." \
-        "On Ubuntu, check that the uidmap package is installed and /usr/bin/newuidmap and /usr/bin/newgidmap are root-owned setuid helpers (mode -rwsr-xr-x)." \
-        "Verify this user's ranges in /etc/subuid and /etc/subgid. If the helpers are missing or have incorrect permissions, an administrator can run 'sudo apt-get install --reinstall uidmap'." \
-        "If the helpers and ranges are correct, ask the VM administrator to check for a nosuid mount or a kernel/AppArmor policy blocking the mapping." >&2
-    else
-      printf '%s\n' \
-        "Rootless Podman needs unprivileged user namespaces enabled by the VM host." \
-        "If Podman reports a stale pause-process state, and no containers are running for this user, try 'podman system migrate' as this same user." \
-        "If it still reports 'cannot clone: Operation not permitted', ask the VM provider/admin to enable rootless Podman/user namespaces; this cannot be fixed inside Magent without host support." >&2
-    fi
+  if ! rootless_status="$(podman info --format '{{.Host.Security.Rootless}}')"; then
+    printf '%s\n' "Podman rootless preflight failed; see the Podman error above." >&2
     fail "Rootless Podman is not available on this VM."
   fi
-  if [[ "$rootless_status" != "true" ]]; then
+  if [[ "$rootless_status" =~ ^[[:space:]]*true[[:space:]]*$ ]]; then
+    return
+  fi
+  if [[ "$rootless_status" =~ ^[[:space:]]*false[[:space:]]*$ ]]; then
+    printf 'Podman rootless status output was: %q\n' "$rootless_status" >&2
     printf '%s\n' \
       "Podman selected a rootful engine for user '$(id -un)'; Magent requires a local rootless engine." \
       "Check 'podman system connection list' for a rootful default connection." \
@@ -359,6 +350,8 @@ check_local_requirements() {
       "Do not switch to rootful Podman; if the local test fails, diagnose its error before retrying setup." >&2
     fail "Podman is not using a rootless engine."
   fi
+  printf 'Podman returned an unexpected rootless status: %q\n' "$rootless_status" >&2
+  fail "Could not determine whether Podman is running rootless."
 }
 
 setup_agent() {
