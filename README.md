@@ -37,9 +37,18 @@ The enrollment token is single-use. The resulting runtime token is written with 
 
 `scripts/manage.sh` builds and enrolls one or more local agents. When a systemd user manager is available and Node.js is not installed from Snap, agents run as user services. Without a systemd user manager, or with Snap-based Node.js (whose confinement may prevent systemd from launching it), the script starts a managed background process instead, recording its PID and logs under `~/.local/state/magent-agent/<name>/`; this fallback does not restart automatically after reboot. Run setup as the regular user that owns rootless Podman (not with `sudo`). The `list`, `start`, `stop`, and `delete` commands can also be run with `sudo`; they operate on the invoking user's agents. The script requires Node.js 22+, pnpm, and rootless Podman 4+. If Podman is missing, setup installs it using the distribution package manager (`apt`, `dnf`/`yum`, `zypper`, or `pacman`) via `sudo`; unsupported distributions must install Podman manually. The script verifies that Podman supports rootless mode before continuing.
 
-Clone this standalone repository to the VM and set up an agent using the API origin and the one-time token generated in the Magent web UI:
+Clone this standalone repository to the VM and set up an agent using the API origin and the one-time token generated in the Magent web UI. The setup script requires Node.js 22+, pnpm, and rootless Podman 4+; on a fresh VM, install Node.js 22+ and pnpm before running it:
 
 ```sh
+sudo apt-get update
+sudo apt-get install -y ca-certificates curl gnupg
+sudo install -d -m 0755 /etc/apt/keyrings
+curl -fsSL https://deb.nodesource.com/gpgkey/nodesource-repo.gpg.key | sudo gpg --dearmor --yes -o /etc/apt/keyrings/nodesource.gpg
+echo "deb [signed-by=/etc/apt/keyrings/nodesource.gpg] https://deb.nodesource.com/node_22.x nodistro main" | sudo tee /etc/apt/sources.list.d/nodesource.list >/dev/null
+sudo apt-get update
+sudo apt-get install -y nodejs
+sudo npm install --global pnpm@12.16.1
+
 git clone https://github.com/Xlongclaw/magent-runtime.git ~/apps/magent-runtime
 cd ~/apps/magent-runtime
 bash scripts/manage.sh setup workstation https://magent.example.test
@@ -48,6 +57,18 @@ bash scripts/manage.sh setup workstation https://magent.example.test
 The script installs workspace dependencies, builds the agent, prompts for the enrollment token without echoing it, and starts `magent-agent@workstation.service`. The long-lived token is stored under `~/.local/state/magent-agent/workstation/agent-token` with owner-only permissions. Each setup requires a distinct name and enrollment token.
 
 The Personal Runtime page can generate an SSH login command and the corresponding setup/reconnect commands. SSH is opened by the user from their own terminal; Magent does not receive or store the SSH private key or connect to the VM. The page remembers only the SSH host, user, port, agent name, and API URL in that browser. After generating a one-time enrollment token in the page, run the setup command in the VM's SSH session and enter the token at the hidden prompt.
+
+### Rootless Podman troubleshooting
+
+The Runtime Agent must run as the regular VM user, not as root, and requires the VM host to permit unprivileged user namespaces for rootless Podman. Check as that same user:
+
+```sh
+podman info --format '{{.Host.Security.Rootless}}'
+unshare -Ur true
+grep "^$(id -un):" /etc/subuid /etc/subgid
+```
+
+If Podman reports a stale pause-process state, and no containers are running for this user, try `podman system migrate` as the agent user, then retry `podman info`. This can stop that user's running containers. Do not use `podman system reset`; it removes Podman data. If `unshare -Ur true` or `podman info` still fails with `cannot clone: Operation not permitted`, the VM host/provider must enable user namespaces (and configure subordinate UID/GID ranges) for this account. Without root or provider-admin assistance, this host limitation cannot be fixed from the Runtime Agent or Magent.
 
 ```sh
 bash scripts/manage.sh list

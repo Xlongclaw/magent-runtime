@@ -332,8 +332,17 @@ check_local_requirements() {
   podman_major="${podman_version%%.*}"
   [[ "$podman_major" =~ ^[0-9]+$ && "$podman_major" -ge 4 ]] ||
     fail "Rootless Podman 4 or newer is required."
-  podman info --format '{{.Host.Security.Rootless}}' 2>/dev/null | grep -qx true ||
-    fail "Podman is unavailable in rootless mode for this user."
+  local rootless_status
+  if ! rootless_status="$(podman info --format '{{.Host.Security.Rootless}}' 2>&1)"; then
+    printf 'Podman rootless preflight failed:\n%s\n' "$rootless_status" >&2
+    printf '%s\n' \
+      "Rootless Podman needs unprivileged user namespaces enabled by the VM host." \
+      "Try 'podman system migrate' as this same user, then retry setup." \
+      "If it still reports 'cannot clone: Operation not permitted', ask the VM provider/admin to enable rootless Podman/user namespaces; this cannot be fixed inside Magent without host support." >&2
+    fail "Rootless Podman is not available on this VM."
+  fi
+  [[ "$rootless_status" == "true" ]] ||
+    fail "Podman is running rootful, but Magent requires rootless Podman. Run setup as the regular VM user, not with sudo."
 }
 
 setup_agent() {
