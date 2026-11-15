@@ -849,6 +849,10 @@ async function runPodmanCommand(
       { timeout: options.timeout, maxBuffer: options.maxBuffer },
       (error: Error | null, stdout: string, stderr: string) => {
         if (error) {
+          const output = [stderr.trim(), stdout.trim()].filter(Boolean).join("\n");
+          if (output) {
+            error.message = `${error.message}\nPodman output:\n${output.slice(-4_096)}`;
+          }
           reject(error);
         } else {
           resolve({ stdout, stderr });

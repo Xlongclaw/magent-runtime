@@ -132,7 +132,20 @@ The Magent web UI's **Disconnect agent** action revokes the agent's server-side 
 User services normally run while the user is logged in. To keep them running after logout and start them at boot, enable systemd lingering for that user:
 
 ```sh
-sudo loginctl enable-linger "$USER"
+sudo loginctl enable-linger "$(id -un)"
+loginctl show-user "$(id -un)" -p Linger
+bash scripts/manage.sh start workstation
 ```
+
+When rootless Podman warns that its cgroup v2 manager is `systemd` but there is no systemd user session, run `loginctl enable-linger` as an administrator for the account that owns Podman, then restart the agent as that regular user. For example, from an SSH login as `admin`:
+
+```sh
+sudo loginctl enable-linger admin
+loginctl show-user admin -p Linger
+bash scripts/manage.sh start <agent-name>
+podman info --format '{{.Host.Security.Rootless}}'
+```
+
+`Linger=yes` confirms lingering is enabled. Restarting through `manage.sh` refreshes the generated unit when the systemd user manager is available, or uses the managed-process fallback otherwise. Keep the agent and Podman rootless; do not run either with `sudo`.
 
 The control plane supports an allowlist of `runtime.inspect` and application lifecycle operations. Queue `runtime.inspect` to collect host CPU, memory, and disk usage and managed-container status/CPU/memory for the runtime dashboard. Install an app using an OCI image reference and the authenticated `/runtimes/applications` API. Rootless Podman launches containers with no network, read-only root filesystems, dropped Linux capabilities, no-new-privileges, CPU/memory/PID limits, a per-app persistent `/data` volume, and a small writable `/tmp`. App configuration uses bounded environment variables; never put secrets in these values. Explicitly granted credentials are retrieved over the authenticated agent connection and mounted as Podman secrets at `/run/secrets/<credential-id>`. Use the app `configure` action to change configuration or grants; it replaces the container while preserving app data. Update keeps the previous image available for rollback; uninstall removes the app's data volume and mounted secrets. No arbitrary command, host path mount, port publishing, or container network access is implemented.
