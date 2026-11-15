@@ -43,6 +43,15 @@ export class RuntimeAgentApiError extends Error {
   }
 }
 
+function truncateErrorMessage(message: string, limit: number): string {
+  const normalized = message.trim();
+  if (normalized.length <= limit) return normalized;
+  const separator = " ... ";
+  const prefixLength = Math.floor((limit - separator.length) / 3);
+  const suffixLength = limit - separator.length - prefixLength;
+  return `${normalized.slice(0, prefixLength)}${separator}${normalized.slice(-suffixLength)}`;
+}
+
 export function normalizeApiBaseUrl(value: string): string {
   let url: URL;
   try {
@@ -190,7 +199,7 @@ export class RuntimeAgentClient {
         body: JSON.stringify({
           leaseToken: command.leaseToken,
           status: "failed",
-          error: error.slice(0, 500),
+          error: truncateErrorMessage(error, 500),
         }),
       },
     );

@@ -5,6 +5,30 @@ import { test } from "node:test";
 import { RuntimeAgent } from "./agent.js";
 import { RuntimeAgentClient, normalizeApiBaseUrl } from "./client.js";
 
+test("Runtime Agent failure acknowledgements preserve the end of long diagnostics", async () => {
+  let acknowledgedError = "";
+  const fetchImpl: typeof fetch = async (_input, init) => {
+    const body = JSON.parse(String(init?.body)) as { error: string };
+    acknowledgedError = body.error;
+    return new Response(null, { status: 204 });
+  };
+  const client = new RuntimeAgentClient(
+    "https://mაგენტ.example.test",
+    "T".repeat(43),
+    fetchImpl,
+  );
+
+  await client.acknowledgeFailure({
+    id: "0123456789abcdef01234567",
+    leaseToken: "L".repeat(43),
+    operation: "app.install",
+  }, `podman secret create ${"warning ".repeat(100)}actual Podman failure`);
+
+  assert.equal(acknowledgedError.length, 500);
+  assert.ok(acknowledgedError.startsWith("podman secret create"));
+  assert.ok(acknowledgedError.endsWith("actual Podman failure"));
+});
+
 test("Runtime Agent heartbeats, polls an authorized inspection command, and acknowledges it", async () => {
   const requests: Array<{ url: string; method: string; authorization: string | null; body?: unknown }> = [];
   const fetchImpl: typeof fetch = async (input, init) => {
