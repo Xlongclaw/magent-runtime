@@ -843,9 +843,13 @@ export async function runPodmanCommand(
   options: { timeout: number; maxBuffer: number; input?: string },
 ): Promise<{ stdout: string; stderr: string }> {
   return new Promise((resolve, reject) => {
+    const [file, execArgs] =
+      options.input !== undefined
+        ? ["/bin/sh", ["-c", 'cat | "$@"', "_", executable, "--remote=false", ...args]]
+        : [executable, ["--remote=false", ...args]];
     const child = execFileCallback(
-      executable,
-      ["--remote=false", ...args],
+      file,
+      execArgs,
       {
         timeout: options.timeout,
         maxBuffer: options.maxBuffer,

@@ -2,8 +2,8 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
-REPO_ROOT="$(cd -- "$SCRIPT_DIR/.." && pwd)"
-AGENT_MAIN="$REPO_ROOT/dist/main.js"
+REPO_ROOT="$(cd -- "$SCRIPT_DIR/../../.." && pwd)"
+AGENT_MAIN="$REPO_ROOT/apps/runtime-agent/dist/main.js"
 CONFIG_HOME="${XDG_CONFIG_HOME:-$HOME/.config}"
 STATE_HOME="${XDG_STATE_HOME:-$HOME/.local/state}"
 INSTANCE_CONFIG_DIR="$CONFIG_HOME/magent-agent/instances"
@@ -236,8 +236,6 @@ ExecStart=$(unit_escape "$node_bin") $(unit_escape "$AGENT_MAIN") run
 Restart=on-failure
 RestartSec=5
 NoNewPrivileges=false
-PrivateTmp=true
-ProtectSystem=full
 
 [Install]
 WantedBy=default.target
@@ -246,7 +244,7 @@ EOF
 }
 
 normalize_api_url() {
-  node --input-type=module - "$REPO_ROOT/dist/client.js" "$1" <<'NODE'
+  node --input-type=module - "$REPO_ROOT/apps/runtime-agent/dist/client.js" "$1" <<'NODE'
 import { pathToFileURL } from "node:url";
 const [clientPath, apiUrl] = process.argv.slice(2);
 const { normalizeApiBaseUrl } = await import(pathToFileURL(clientPath));
