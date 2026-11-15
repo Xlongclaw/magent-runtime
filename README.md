@@ -68,6 +68,18 @@ unshare -Ur true
 grep "^$(id -un):" /etc/subuid /etc/subgid
 ```
 
+If Podman reports `false` for rootless mode, check whether it is configured to use a rootful remote connection or whether a connection environment variable is set:
+
+```sh
+podman system connection list
+printf 'CONTAINER_HOST=%s\nCONTAINER_CONNECTION=%s\nDOCKER_HOST=%s\n' \
+  "${CONTAINER_HOST:+set}" "${CONTAINER_CONNECTION:+set}" "${DOCKER_HOST:+set}"
+env -u CONTAINER_HOST -u CONTAINER_CONNECTION -u DOCKER_HOST \
+  /usr/bin/podman info --format '{{.Host.Security.Rootless}}'
+```
+
+The last command should print `true` for the local rootless engine. If it prints `false`, inspect the Podman connection configuration and select/configure a local rootless connection; do not make a rootful connection the workaround. If it fails, follow the error diagnostics below.
+
 If Podman reports a stale pause-process state, and no containers are running for this user, try `podman system migrate` as the agent user, then retry `podman info`. This can stop that user's running containers. Do not use `podman system reset`; it removes Podman data.
 
 On Ubuntu, if `kernel.apparmor_restrict_unprivileged_userns` is `1` and `unshare -Ur true` fails, AppArmor's unprivileged user-namespace restriction may be blocking rootless Podman. An administrator can test whether this is the cause with:

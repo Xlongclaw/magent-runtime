@@ -350,8 +350,15 @@ check_local_requirements() {
     fi
     fail "Rootless Podman is not available on this VM."
   fi
-  [[ "$rootless_status" == "true" ]] ||
-    fail "Podman is running rootful, but Magent requires rootless Podman. Run setup as the regular VM user, not with sudo."
+  if [[ "$rootless_status" != "true" ]]; then
+    printf '%s\n' \
+      "Podman selected a rootful engine for user '$(id -un)'; Magent requires a local rootless engine." \
+      "Check 'podman system connection list' for a rootful default connection." \
+      "Also check whether CONTAINER_HOST, CONTAINER_CONNECTION, or DOCKER_HOST is set." \
+      "Test local Podman with: env -u CONTAINER_HOST -u CONTAINER_CONNECTION -u DOCKER_HOST /usr/bin/podman info --format '{{.Host.Security.Rootless}}'" \
+      "Do not switch to rootful Podman; if the local test fails, diagnose its error before retrying setup." >&2
+    fail "Podman is not using a rootless engine."
+  fi
 }
 
 setup_agent() {
