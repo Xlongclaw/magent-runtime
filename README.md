@@ -68,7 +68,43 @@ unshare -Ur true
 grep "^$(id -un):" /etc/subuid /etc/subgid
 ```
 
-If Podman reports a stale pause-process state, and no containers are running for this user, try `podman system migrate` as the agent user, then retry `podman info`. This can stop that user's running containers. Do not use `podman system reset`; it removes Podman data. If `unshare -Ur true` or `podman info` still fails with `cannot clone: Operation not permitted`, the VM host/provider must enable user namespaces (and configure subordinate UID/GID ranges) for this account. Without root or provider-admin assistance, this host limitation cannot be fixed from the Runtime Agent or Magent.
+If Podman reports a stale pause-process state, and no containers are running for this user, try `podman system migrate` as the agent user, then retry `podman info`. This can stop that user's running containers. Do not use `podman system reset`; it removes Podman data.
+
+On Ubuntu, if `kernel.apparmor_restrict_unprivileged_userns` is `1` and `unshare -Ur true` fails, AppArmor's unprivileged user-namespace restriction may be blocking rootless Podman. An administrator can test whether this is the cause with:
+
+```sh
+sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+```
+
+Then, as the regular agent user, verify `unshare -Ur true` and `podman info --format '{{.Host.Security.Rootless}}'`. Setting this sysctl to `0` disables this AppArmor restriction system-wide, reducing a security control for unprivileged user namespaces. Only make it persistent if that tradeoff is acceptable for the VM:
+
+```sh
+echo 'kernel.apparmor_restrict_unprivileged_userns=0' | sudo tee /etc/sysctl.d/99-rootless-podman.conf
+sudo sysctl --system
+```
+
+To undo the persistent setting, remove `/etc/sysctl.d/99-rootless-podman.conf` and restore the original value (commonly `1` on affected Ubuntu releases) with `sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=1`. If the setting is unavailable or disabling it does not resolve `cannot clone: Operation not permitted`, the VM host/provider must allow unprivileged user namespaces and configure subordinate UID/GID ranges for this account. Without root or provider-admin assistance, host restrictions cannot be fixed from the Runtime Agent or Magent.
+
+If namespace creation works but Podman fails with `newuidmap: write to uid_map failed` when run by the Runtime Agent, check the generated user service first. The agent service must not enable `NoNewPrivileges`; rootless Podman needs its `newuidmap` setuid helper to configure subordinate UID mappings. Update the standalone checkout, then regenerate and restart the service as the regular agent user:
+
+```sh
+git pull --ff-only
+bash scripts/manage.sh stop workstation
+bash scripts/manage.sh start workstation
+```
+
+The regenerated service explicitly sets `NoNewPrivileges=false` for the agent process, which still runs as the regular user. Managed application containers continue to use Podman's `no-new-privileges` security option.
+
+If Podman still fails, check the mapping helpers and ranges:
+
+```sh
+dpkg-query -W uidmap
+stat -c '%A %U:%G %n' /usr/bin/newuidmap /usr/bin/newgidmap
+grep "^$(id -un):" /etc/subuid /etc/subgid
+findmnt -no TARGET,OPTIONS --target /usr/bin/newuidmap
+```
+
+The helpers should be owned by `root:root` and have the setuid bit (typically mode `-rwsr-xr-x`); the user's `/etc/subuid` and `/etc/subgid` entries must each provide a subordinate range. If `uidmap` is missing or the helper permissions are incorrect, an administrator can restore the package with `sudo apt-get install --reinstall uidmap`. If the helper is correct but its filesystem is mounted with `nosuid`, or the mapping is still denied, an administrator should check the VM's security policy and kernel logs (for example, `sudo journalctl -k --since "10 minutes ago" | grep -i apparmor`). Do not change mount security options or run the agent as root as a workaround.
 
 ```sh
 bash scripts/manage.sh list

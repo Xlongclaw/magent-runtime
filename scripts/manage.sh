@@ -231,7 +231,7 @@ WorkingDirectory=$(unit_path_escape "$REPO_ROOT")
 ExecStart=$(unit_escape "$node_bin") $(unit_escape "$AGENT_MAIN") run
 Restart=on-failure
 RestartSec=5
-NoNewPrivileges=true
+NoNewPrivileges=false
 PrivateTmp=true
 ProtectSystem=full
 
@@ -335,10 +335,19 @@ check_local_requirements() {
   local rootless_status
   if ! rootless_status="$(podman info --format '{{.Host.Security.Rootless}}' 2>&1)"; then
     printf 'Podman rootless preflight failed:\n%s\n' "$rootless_status" >&2
-    printf '%s\n' \
-      "Rootless Podman needs unprivileged user namespaces enabled by the VM host." \
-      "Try 'podman system migrate' as this same user, then retry setup." \
-      "If it still reports 'cannot clone: Operation not permitted', ask the VM provider/admin to enable rootless Podman/user namespaces; this cannot be fixed inside Magent without host support." >&2
+    if [[ "$rootless_status" == *newuidmap* || "$rootless_status" == *newgidmap* ||
+      "$rootless_status" == *uid_map* || "$rootless_status" == *gid_map* ]]; then
+      printf '%s\n' \
+        "Podman could not configure the rootless UID/GID mapping." \
+        "On Ubuntu, check that the uidmap package is installed and /usr/bin/newuidmap and /usr/bin/newgidmap are root-owned setuid helpers (mode -rwsr-xr-x)." \
+        "Verify this user's ranges in /etc/subuid and /etc/subgid. If the helpers are missing or have incorrect permissions, an administrator can run 'sudo apt-get install --reinstall uidmap'." \
+        "If the helpers and ranges are correct, ask the VM administrator to check for a nosuid mount or a kernel/AppArmor policy blocking the mapping." >&2
+    else
+      printf '%s\n' \
+        "Rootless Podman needs unprivileged user namespaces enabled by the VM host." \
+        "If Podman reports a stale pause-process state, and no containers are running for this user, try 'podman system migrate' as this same user." \
+        "If it still reports 'cannot clone: Operation not permitted', ask the VM provider/admin to enable rootless Podman/user namespaces; this cannot be fixed inside Magent without host support." >&2
+    fi
     fail "Rootless Podman is not available on this VM."
   fi
   [[ "$rootless_status" == "true" ]] ||
