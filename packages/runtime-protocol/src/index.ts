@@ -22,9 +22,61 @@ export const runtimeCommandOperations = {
   uninstall: "app.uninstall",
   rollback: "app.rollback",
   configure: "app.configure",
+  appStudioBuild: "appstudio.build",
+  appStudioCommand: "appstudio.command",
 } as const;
 
 export const agentCommandOperationSchema = z.nativeEnum(runtimeCommandOperations);
+const appStudioProjectIdSchema = z.string().regex(/^[a-f\d]{24}$/i);
+const appStudioVersionSchema = z.string().regex(
+  /^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)(?:-[0-9A-Za-z.-]+)?$/,
+).max(64);
+const appStudioImageSchema = z.string().min(1).max(512).regex(
+  /^ghcr\.io\/[a-z0-9][a-z0-9-]{0,38}\/[a-z0-9][a-z0-9._-]{0,127}:[A-Za-z0-9_][A-Za-z0-9_.-]{0,127}$/,
+);
+
+export const appStudioBuildPayloadSchema = z.object({
+  projectId: appStudioProjectIdSchema,
+  appId: applicationIdSchema,
+  version: appStudioVersionSchema,
+  digest: z.string().regex(/^[a-f\d]{64}$/i),
+  archive: z.string().min(1).max(1_000_000),
+  localImage: z.string().min(1).max(512),
+  registryImage: appStudioImageSchema.optional(),
+  registryCredentialId: z.string().regex(/^[a-f\d]{24}$/i).optional(),
+}).strict().superRefine((payload, context) => {
+  if (Boolean(payload.registryImage) !== Boolean(payload.registryCredentialId)) {
+    context.addIssue({
+      code: z.ZodIssueCode.custom,
+      message: "GHCR image and runtime credential must be provided together.",
+    });
+  }
+});
+
+export const appStudioCommandPayloadSchema = z.object({
+  projectId: appStudioProjectIdSchema,
+  appId: applicationIdSchema,
+  archive: z.string().min(1).max(1_000_000),
+  command: z.string().trim().min(1).max(1_000).refine((value) => !value.includes("\0")),
+}).strict();
+
+export const appStudioBuildResultSchema = z.object({
+  projectId: appStudioProjectIdSchema,
+  appId: applicationIdSchema,
+  version: appStudioVersionSchema,
+  digest: z.string().regex(/^[a-f\d]{64}$/i),
+  localImage: z.string().min(1).max(512),
+  registryImage: appStudioImageSchema.nullable(),
+  registryDigest: z.string().regex(/^sha256:[a-f\d]{64}$/i).nullable(),
+  logs: z.string().max(65_536),
+}).strict();
+
+export const appStudioCommandResultSchema = z.object({
+  projectId: appStudioProjectIdSchema,
+  output: z.string().max(65_536),
+  exitCode: z.number().int().min(0).max(255),
+  truncated: z.boolean(),
+}).strict();
 
 export const runtimeInspectionResultSchema = z.object({
   agentVersion: z.string().min(1).max(64),
@@ -76,6 +128,11 @@ export interface LeasedCommand {
   operation: AgentCommandOperation;
   payload?: Record<string, unknown>;
 }
+
+export type AppStudioBuildPayload = z.infer<typeof appStudioBuildPayloadSchema>;
+export type AppStudioCommandPayload = z.infer<typeof appStudioCommandPayloadSchema>;
+export type AppStudioBuildResult = z.infer<typeof appStudioBuildResultSchema>;
+export type AppStudioCommandResult = z.infer<typeof appStudioCommandResultSchema>;
 
 export interface ApplicationCredential {
   credentialId: string;

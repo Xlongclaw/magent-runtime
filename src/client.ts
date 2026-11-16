@@ -1,6 +1,10 @@
 import { agentCommandOperationSchema } from "@magent/runtime-protocol";
 import type {
   AgentCommandOperation,
+  AppStudioBuildResult,
+  AppStudioBuildPayload,
+  AppStudioCommandPayload,
+  AppStudioCommandResult,
   ApplicationCommand,
   ApplicationCredential,
   ApplicationLifecycleResult,
@@ -15,6 +19,10 @@ import type {
 
 export type {
   AgentCommandOperation,
+  AppStudioBuildResult,
+  AppStudioBuildPayload,
+  AppStudioCommandPayload,
+  AppStudioCommandResult,
   ApplicationCommand,
   ApplicationCredential,
   ApplicationLifecycleResult,
@@ -173,7 +181,8 @@ export class RuntimeAgentClient {
 
   async acknowledgeSuccess(
     command: LeasedCommand,
-    result: RuntimeInspection | ApplicationLifecycleResult | ApplicationLogsResult | MapCommandResult,
+    result: RuntimeInspection | ApplicationLifecycleResult | ApplicationLogsResult |
+      MapCommandResult | AppStudioBuildResult | AppStudioCommandResult,
   ): Promise<void> {
     const response = await this.request(
       `/runtimes/agent/commands/${encodeURIComponent(command.id)}/acknowledge`,
@@ -225,6 +234,24 @@ export class RuntimeAgentClient {
     const body: unknown = await response.json();
     if (!isObject(body) || typeof body.value !== "string" || body.value.length === 0) {
       throw new Error("Magent returned an invalid application credential.");
+    }
+    return body.value;
+  }
+
+  async getRuntimeCredential(credentialId: string): Promise<string> {
+    if (!/^[a-f\d]{24}$/i.test(credentialId)) {
+      throw new Error("Runtime credential reference has an invalid format.");
+    }
+    const response = await this.request(
+      `/credentials/agent/${encodeURIComponent(credentialId)}`,
+      { method: "GET" },
+    );
+    if (!response.ok) {
+      throw new RuntimeAgentApiError("Could not retrieve a runtime credential.", response.status);
+    }
+    const body: unknown = await response.json();
+    if (!isObject(body) || typeof body.value !== "string" || body.value.length === 0) {
+      throw new Error("Magent returned an invalid runtime credential.");
     }
     return body.value;
   }

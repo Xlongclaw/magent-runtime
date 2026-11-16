@@ -1,6 +1,12 @@
 import { execFile as execFileCallback } from "node:child_process";
 import { createHash } from "node:crypto";
+import { mkdtemp, mkdir, readFile, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { dirname, join, relative, resolve, sep } from "node:path";
+import { gunzipSync } from "node:zlib";
 import type {
+  AppStudioBuildResult,
+  AppStudioCommandResult,
   ApplicationCommand,
   ApplicationCredential,
   ApplicationLogsResult,
@@ -17,12 +23,14 @@ import type {
 const appIdPattern = /^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?(?:\.[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?)*$/;
 const imagePattern = /^(?:(?:[a-z0-9]+(?:[.-][a-z0-9]+)*(?::[0-9]{1,5})?\/)?[a-z0-9]+(?:[._-][a-z0-9]+)*(?:\/[a-z0-9]+(?:[._-][a-z0-9]+)*)*)(?::[A-Za-z0-9_][A-Za-z0-9_.-]{0,127}|@sha256:[a-f0-9]{64})$/;
 const MAX_LOG_BYTES = 65_536;
+const APP_STUDIO_TERMINAL_IMAGE = "docker.io/library/node:22-alpine";
+const APP_STUDIO_LOCAL_IMAGE_PREFIX = "localhost/magent/";
 
 export interface PodmanCommandRunner {
   (executable: string, args: string[], options: {
     timeout: number;
     maxBuffer: number;
-    input?: string;
+    input?: string | Uint8Array;
   }): Promise<{
     stdout: string;
     stderr: string;
@@ -106,6 +114,157 @@ export class PodmanApplicationEngine {
         return { applicationId: appId, status: "removed" };
       default:
         throw new Error("Unsupported application lifecycle operation.");
+    }
+  }
+
+  async buildAppStudioImage(input: {
+    projectId: string;
+    appId: string;
+    version: string;
+    digest: string;
+    archive: Buffer;
+    localImage: string;
+    registryImage?: string;
+    registryCredential?: string;
+  }): Promise<AppStudioBuildResult> {
+    this.validateAppId(input.appId);
+    const expectedLocalImage = `${APP_STUDIO_LOCAL_IMAGE_PREFIX}${input.appId.replaceAll(".", "-")}:${input.version}-${input.digest.slice(0, 24)}`;
+    if (!/^[a-f\d]{24}$/i.test(input.projectId) ||
+        !/^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)(?:-[0-9A-Za-z.-]+)?$/.test(input.version) ||
+        !/^[a-f\d]{64}$/i.test(input.digest) ||
+        input.localImage !== expectedLocalImage) {
+      throw new Error("App Studio image build metadata is invalid.");
+    }
+    this.validateImageReference(input.localImage);
+    if (input.registryImage) {
+      if (!input.registryCredential) {
+        throw new Error("A runtime-granted GHCR credential is required to push this image.");
+      }
+      this.validateGhcrImage(input.registryImage);
+    } else if (input.registryCredential) {
+      throw new Error("A GHCR credential cannot be used without a registry image.");
+    }
+    if (input.archive.length === 0 || input.archive.length > 750_000) {
+      throw new Error("App Studio package exceeds the runtime build limit.");
+    }
+    const registryCredentials = input.registryImage
+      ? parseGhcrCredentials(input.registryCredential!)
+      : null;
+    await this.ensureRootlessPodman();
+
+    const tags = [`--tag=${input.localImage}`];
+    if (input.registryImage) tags.push(`--tag=${input.registryImage}`);
+    const { stdout, stderr } = await this.run(this.executable, [
+      "build",
+      "--pull=missing",
+      "--memory=512m",
+      "--cpus=2",
+      ...tags,
+      "--file=Dockerfile",
+      "-",
+    ], {
+      timeout: 600_000,
+      maxBuffer: 2 * 1024 * 1024,
+      input: input.archive,
+    });
+    const logs = truncateUtf8([stdout.trim(), stderr.trim()].filter(Boolean).join("\n"), MAX_LOG_BYTES);
+    let registryDigest: string | null = null;
+    if (input.registryImage && registryCredentials) {
+      const authDirectory = await mkdtemp(join(tmpdir(), "mაგენტ-ghcr-auth-"));
+      const authFile = join(authDirectory, "auth.json");
+      const digestFile = join(authDirectory, "digest");
+      try {
+        await this.commandWithInput([
+          "login",
+          "--authfile",
+          authFile,
+          "--username",
+          registryCredentials.username,
+          "--password-stdin",
+          "ghcr.io",
+        ], registryCredentials.token);
+        await this.command([
+          "push",
+          "--authfile",
+          authFile,
+          `--digestfile=${digestFile}`,
+          input.registryImage,
+        ], 1024 * 1024, 600_000);
+        registryDigest = (await readFile(digestFile, "utf8")).trim();
+        if (!/^sha256:[a-f\d]{64}$/i.test(registryDigest)) {
+          throw new Error("GHCR did not return a valid OCI image digest.");
+        }
+      } finally {
+        await rm(authDirectory, { recursive: true, force: true });
+      }
+    }
+    return {
+      projectId: input.projectId,
+      appId: input.appId,
+      version: input.version,
+      digest: input.digest,
+      localImage: input.localImage,
+      registryImage: input.registryImage ?? null,
+      registryDigest,
+      logs,
+    };
+  }
+
+  async executeAppStudioCommand(input: {
+    projectId: string;
+    archive: Buffer;
+    command: string;
+  }): Promise<AppStudioCommandResult> {
+    if (!/^[a-f\d]{24}$/i.test(input.projectId) ||
+        !input.command.trim() || input.command.length > 1_000 ||
+        input.command.includes("\0") ||
+        input.archive.length === 0 || input.archive.length > 750_000) {
+      throw new Error("App Studio terminal request is invalid.");
+    }
+    await this.ensureRootlessPodman();
+    await this.ensureTerminalImage();
+    const directory = await extractAppStudioArchive(input.archive);
+    try {
+      const { stdout, stderr } = await this.run(this.executable, [
+        "run",
+        "--rm",
+        "--network=none",
+        "--read-only",
+        "--cap-drop=ALL",
+        "--security-opt=no-new-privileges",
+        "--pids-limit=64",
+        "--memory=256m",
+        "--cpus=1",
+        "--userns=keep-id",
+        "--tmpfs=/tmp:rw,noexec,nosuid,size=32m",
+        "--tmpfs=/workspace:rw,noexec,nosuid,size=64m",
+        `--volume=${directory}:/source:ro`,
+        APP_STUDIO_TERMINAL_IMAGE,
+        "sh",
+        "-lc",
+        'cp -R /source/. /workspace && cd /workspace || exit 125; sh -lc "$1" > /tmp/magent-output 2>&1; status=$?; bytes=$(wc -c < /tmp/magent-output); head -c 65536 /tmp/magent-output; printf "\\n__MAGENT_EXIT_CODE=%s;OUTPUT_BYTES=%s\\n" "$status" "$bytes"',
+        "mაგენტ-app-studio-terminal",
+        input.command,
+      ], {
+        timeout: 60_000,
+        maxBuffer: 128 * 1024,
+      });
+      const exitMarker = /\n__MAGENT_EXIT_CODE=(\d{1,3});OUTPUT_BYTES=(\d+)\s*$/.exec(stdout);
+      if (!exitMarker?.[1]) {
+        throw new Error("Isolated terminal did not return a valid command status.");
+      }
+      const fullOutput = [stdout.slice(0, exitMarker.index).trimEnd(), stderr.trim()]
+        .filter(Boolean)
+        .join("\n");
+      return {
+        projectId: input.projectId,
+        output: truncateUtf8(fullOutput, MAX_LOG_BYTES),
+        exitCode: Number(exitMarker[1]),
+        truncated: Number(exitMarker[2]) > MAX_LOG_BYTES ||
+          Buffer.byteLength(fullOutput) > MAX_LOG_BYTES,
+      };
+    } finally {
+      await rm(directory, { recursive: true, force: true });
     }
   }
 
@@ -258,7 +417,7 @@ export class PodmanApplicationEngine {
       }
       await this.command(["rm", "--force", this.containerName(appId)]);
     }
-    await this.pull(image);
+    await this.ensureImage(image);
     await this.createSecrets(appId, generation, credentials);
     try {
       await this.runContainer(appId, generation, image, cpuCount, memoryMb, environment, credentials, manifest, mapToken);
@@ -298,7 +457,7 @@ export class PodmanApplicationEngine {
       );
       return;
     }
-    await this.pull(image);
+    await this.ensureImage(image);
     await this.createSecrets(appId, generation, credentials);
     try {
       await this.command(["stop", "--time", "10", this.containerName(appId)]);
@@ -534,6 +693,20 @@ export class PodmanApplicationEngine {
     await this.command(["pull", image]);
   }
 
+  private async ensureImage(image: string): Promise<void> {
+    if (image.startsWith(APP_STUDIO_LOCAL_IMAGE_PREFIX)) {
+      if (await this.exists(["image", "exists", image])) return;
+      throw new Error("The runtime-local App Studio image is missing. Build it on this runtime before installing.");
+    }
+    await this.pull(image);
+  }
+
+  private async ensureTerminalImage(): Promise<void> {
+    if (!(await this.exists(["image", "exists", APP_STUDIO_TERMINAL_IMAGE]))) {
+      await this.pull(APP_STUDIO_TERMINAL_IMAGE);
+    }
+  }
+
   private async requireContainer(appId: string): Promise<void> {
     if (!(await this.exists(["container", "exists", this.containerName(appId)]))) {
       throw new Error(`Managed container for ${appId} does not exist.`);
@@ -575,14 +748,21 @@ export class PodmanApplicationEngine {
     await this.rootlessCheck;
   }
 
-  private command(args: string[], maxBuffer = 128 * 1024): Promise<{ stdout: string; stderr: string }> {
+  private command(
+    args: string[],
+    maxBuffer = 128 * 1024,
+    timeout = 120_000,
+  ): Promise<{ stdout: string; stderr: string }> {
     return this.run(this.executable, args, {
-      timeout: 120_000,
+      timeout,
       maxBuffer,
     });
   }
 
-  private async commandWithInput(args: string[], input: string): Promise<{ stdout: string; stderr: string }> {
+  private async commandWithInput(
+    args: string[],
+    input: string | Uint8Array,
+  ): Promise<{ stdout: string; stderr: string }> {
     return this.run(this.executable, args, {
       timeout: 120_000,
       maxBuffer: 128 * 1024,
@@ -601,6 +781,18 @@ export class PodmanApplicationEngine {
       throw new Error("Application image reference has an invalid format.");
     }
     return image;
+  }
+
+  private validateImageReference(image: string): void {
+    if (!imagePattern.test(image)) {
+      throw new Error("App Studio image reference has an invalid format.");
+    }
+  }
+
+  private validateGhcrImage(image: string): void {
+    if (!/^ghcr\.io\/[a-z0-9][a-z0-9-]{0,38}\/[a-z0-9][a-z0-9._-]{0,127}:[A-Za-z0-9_][A-Za-z0-9_.-]{0,127}$/.test(image)) {
+      throw new Error("App Studio can only push tagged images to a GHCR owner/repository.");
+    }
   }
 
   private requiredCpuCount(cpuCount: number | undefined): number {
@@ -738,6 +930,91 @@ async function readResponseJson(response: Response): Promise<unknown> {
   }
 }
 
+function parseGhcrCredentials(value: string): { username: string; token: string } {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(value) as unknown;
+  } catch {
+    throw new Error("The runtime GHCR credential must contain JSON with username and token fields.");
+  }
+  if (
+    typeof parsed !== "object" || parsed === null || Array.isArray(parsed) ||
+    !("username" in parsed) || typeof parsed.username !== "string" ||
+    !/^[A-Za-z0-9-]{1,39}$/.test(parsed.username) ||
+    !("token" in parsed) || typeof parsed.token !== "string" ||
+    parsed.token.length < 1 || parsed.token.length > 4_096 ||
+    /[\r\n\0]/.test(parsed.token)
+  ) {
+    throw new Error("The runtime GHCR credential must contain a valid username and token.");
+  }
+  return { username: parsed.username, token: parsed.token };
+}
+
+function truncateUtf8(value: string, limit: number): string {
+  const bytes = Buffer.from(value);
+  if (bytes.length <= limit) return value;
+  return bytes.subarray(bytes.length - limit).toString("utf8");
+}
+
+async function extractAppStudioArchive(archive: Buffer): Promise<string> {
+  let tar: Buffer;
+  try {
+    tar = gunzipSync(archive, { maxOutputLength: 2 * 1024 * 1024 });
+  } catch {
+    throw new Error("App Studio source package is not a valid bounded gzip archive.");
+  }
+  const directory = await mkdtemp(join(tmpdir(), "mაგენტ-app-studio-"));
+  const seen = new Set<string>();
+  const root = resolve(directory);
+  let offset = 0;
+  try {
+    while (offset + 512 <= tar.length) {
+      const header = tar.subarray(offset, offset + 512);
+      if (header.every((byte) => byte === 0)) break;
+      const checksum = Number.parseInt(
+        header.subarray(148, 156).toString("ascii").replace(/\0.*$/, "").trim(),
+        8,
+      );
+      const checksumHeader = Buffer.from(header);
+      checksumHeader.fill(0x20, 148, 156);
+      if (!Number.isInteger(checksum) || checksumHeader.reduce((sum, byte) => sum + byte, 0) !== checksum) {
+        throw new Error("App Studio source package has an invalid tar header.");
+      }
+      const path = header.subarray(0, 100).toString("utf8").replace(/\0.*$/, "");
+      const sizeText = header.subarray(124, 136).toString("ascii").replace(/\0.*$/, "").trim();
+      const size = Number.parseInt(sizeText, 8);
+      const type = header[156];
+      if (!path || path.startsWith("/") || path.includes("\\") ||
+          path.split("/").some((part) => !part || part === "." || part === "..") ||
+          (type !== 0 && type !== 48) || !Number.isInteger(size) || size < 0 ||
+          size > 512_000 ||
+          offset + 512 + Math.ceil(size / 512) * 512 > tar.length ||
+          seen.has(path)) {
+        throw new Error("App Studio source package contains an unsupported archive entry.");
+      }
+      seen.add(path);
+      const target = resolve(root, path);
+      const relativePath = relative(root, target);
+      if (!relativePath || relativePath.startsWith(`..${sep}`) || relativePath === "..") {
+        throw new Error("App Studio source package contains an unsafe path.");
+      }
+      await mkdir(dirname(target), { recursive: true, mode: 0o700 });
+      await writeFile(target, tar.subarray(offset + 512, offset + 512 + size), {
+        flag: "wx",
+        mode: 0o600,
+      });
+      offset += 512 + Math.ceil(size / 512) * 512;
+    }
+    if (!seen.has("Dockerfile") || !seen.has("package.json")) {
+      throw new Error("App Studio source package is missing required project files.");
+    }
+    return directory;
+  } catch (error) {
+    await rm(directory, { recursive: true, force: true });
+    throw error;
+  }
+}
+
 function mapErrorMessage(value: unknown, statusCode: number): string {
   if (
     typeof value === "object" &&
@@ -840,7 +1117,7 @@ function parseByteSize(value: string): number | null {
 export async function runPodmanCommand(
   executable: string,
   args: string[],
-  options: { timeout: number; maxBuffer: number; input?: string },
+  options: { timeout: number; maxBuffer: number; input?: string | Uint8Array },
 ): Promise<{ stdout: string; stderr: string }> {
   return new Promise((resolve, reject) => {
     const [file, execArgs] =

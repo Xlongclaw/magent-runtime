@@ -3,6 +3,7 @@ import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
+import { gzipSync } from "node:zlib";
 import type { ApplicationCommand } from "./client.js";
 import {
   PodmanApplicationEngine,
@@ -32,6 +33,28 @@ function command(
 }
 
 let commandId = 0;
+
+function appStudioArchive(files: Record<string, string>): Buffer {
+  const entries = Object.entries(files).map(([path, value]) => {
+    const body = Buffer.from(value);
+    const header = Buffer.alloc(512);
+    header.write(path, 0, 100, "utf8");
+    header.write("0000644\0", 100, 8, "ascii");
+    header.write("0000000\0", 108, 8, "ascii");
+    header.write("0000000\0", 116, 8, "ascii");
+    header.write(`${body.length.toString(8).padStart(11, "0")}\0`, 124, 12, "ascii");
+    header.write("00000000000\0", 136, 12, "ascii");
+    header.fill(0x20, 148, 156);
+    header[156] = "0".charCodeAt(0);
+    header.write("ustar\0", 257, 6, "ascii");
+    header.write("00", 263, 2, "ascii");
+    const checksum = header.reduce((sum, byte) => sum + byte, 0);
+    header.write(`${checksum.toString(8).padStart(6, "0")}\0 `, 148, 8, "ascii");
+    const padding = body.length % 512 ? Buffer.alloc(512 - body.length % 512) : Buffer.alloc(0);
+    return Buffer.concat([header, body, padding]);
+  });
+  return gzipSync(Buffer.concat([...entries, Buffer.alloc(1024)]));
+}
 
 function exitCodeError(code: number): Error & { code: number } {
   return Object.assign(new Error(`Podman exited with ${code}`), { code });
@@ -74,6 +97,98 @@ test("Podman command runner forces local mode and forwards secret stdin", async 
   }
 });
 
+test("App Studio image builds on the runtime and passes GHCR tokens only over stdin", async () => {
+  const calls: Array<{ args: string[]; input?: string | Uint8Array }> = [];
+  const archive = appStudioArchive({ Dockerfile: "FROM node:22-alpine\n", "package.json": "{}" });
+  const runner: PodmanCommandRunner = async (_executable, args, options) => {
+    calls.push({ args, ...(options.input !== undefined ? { input: options.input } : {}) });
+    if (args[0] === "info") return { stdout: "true\n", stderr: "" };
+    if (args[0] === "push") {
+      const digestFile = args.find((argument) => argument.startsWith("--digestfile="))?.slice("--digestfile=".length);
+      assert.ok(digestFile);
+      await writeFile(digestFile, `sha256:${"a".repeat(64)}`);
+    }
+    return { stdout: "build output", stderr: "" };
+  };
+  const engine = new PodmanApplicationEngine("podman-test", runner);
+  const result = await engine.buildAppStudioImage({
+    projectId: "0123456789abcdef01234567",
+    appId: "example.notes",
+    version: "1.0.0",
+    digest: "a".repeat(64),
+    archive,
+    localImage: `localhost/magent/example-notes:1.0.0-${"a".repeat(24)}`,
+    registryImage: "ghcr.io/testowner/notes:1.0.0",
+    registryCredential: JSON.stringify({ username: "testowner", token: "secret-token" }),
+  });
+  assert.equal(result.localImage, `localhost/magent/example-notes:1.0.0-${"a".repeat(24)}`);
+  assert.equal(result.registryImage, "ghcr.io/testowner/notes:1.0.0");
+  assert.equal(result.registryDigest, `sha256:${"a".repeat(64)}`);
+  const build = calls.find(({ args }) => args[0] === "build");
+  assert.ok(build);
+  assert.equal(build.input instanceof Uint8Array, true);
+  assert.deepEqual(build.args.filter((argument) => argument.startsWith("--tag=")), [
+    `--tag=localhost/magent/example-notes:1.0.0-${"a".repeat(24)}`,
+    "--tag=ghcr.io/testowner/notes:1.0.0",
+  ]);
+  const login = calls.find(({ args }) => args[0] === "login");
+  assert.ok(login);
+  assert.equal(login.args.includes("secret-token"), false);
+  assert.equal(login.input, "secret-token");
+  assert.ok(calls.some(({ args }) => args[0] === "push"));
+
+  const localBuild = await engine.buildAppStudioImage({
+    projectId: "0123456789abcdef01234567",
+    appId: "example.notes",
+    version: "1.0.0",
+    digest: "a".repeat(64),
+    archive,
+    localImage: `localhost/magent/example-notes:1.0.0-${"a".repeat(24)}`,
+  });
+  assert.equal(localBuild.registryImage, null);
+  assert.equal(localBuild.registryDigest, null);
+  assert.equal(calls.filter(({ args }) => args[0] === "push").length, 1);
+});
+
+test("App Studio terminal runs a temporary source copy in a rootless, networkless container", async () => {
+  const calls: Array<{ args: string[]; options: { timeout: number; maxBuffer: number } }> = [];
+  const runner: PodmanCommandRunner = async (_executable, args, options) => {
+    calls.push({ args, options });
+    if (args[0] === "info") return { stdout: "true\n", stderr: "" };
+    if (args[0] === "run") return { stdout: "tests passed\n__MAGENT_EXIT_CODE=0;OUTPUT_BYTES=12\n", stderr: "" };
+    return { stdout: "", stderr: "" };
+  };
+  const engine = new PodmanApplicationEngine("podman-test", runner);
+  const result = await engine.executeAppStudioCommand({
+    projectId: "0123456789abcdef01234567",
+    archive: appStudioArchive({
+      Dockerfile: "FROM node:22-alpine\n",
+      "package.json": "{}",
+      "src/server.js": "console.log('test');",
+    }),
+    command: "node --test",
+  });
+  assert.equal(result.exitCode, 0);
+  assert.equal(result.output, "tests passed");
+  const run = calls.find(({ args }) => args[0] === "run");
+  assert.ok(run);
+  for (const requiredFlag of [
+    "--network=none",
+    "--read-only",
+    "--cap-drop=ALL",
+    "--security-opt=no-new-privileges",
+    "--pids-limit=64",
+    "--memory=256m",
+    "--cpus=1",
+    "--tmpfs=/tmp:rw,noexec,nosuid,size=32m",
+    "--tmpfs=/workspace:rw,noexec,nosuid,size=64m",
+  ]) {
+    assert.ok(run.args.includes(requiredFlag), `missing terminal isolation flag ${requiredFlag}`);
+  }
+  assert.equal(run.args.at(-1), "node --test");
+  assert.equal(run.options.timeout, 60_000);
+});
+
 test("Podman lifecycle uses rootless, isolated containers and preserves app storage", async () => {
   const calls: string[][] = [];
   const volumes = new Set<string>();
@@ -109,7 +224,10 @@ test("Podman lifecycle uses rootless, isolated containers and preserves app stor
     if (args[0] === "secret" && args[1] === "create") {
       const name = args[2] ?? "";
       secrets.add(name);
-      secretInputs.set(name, options.input ?? "");
+      secretInputs.set(
+        name,
+        typeof options.input === "string" ? options.input : Buffer.from(options.input ?? []).toString("utf8"),
+      );
       return { stdout: "", stderr: "" };
     }
     if (args[0] === "secret" && args[1] === "rm") {

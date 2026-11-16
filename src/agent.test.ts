@@ -223,6 +223,78 @@ test("Runtime Agent collects application logs and acknowledges bounded output", 
   });
 });
 
+test("Runtime Agent builds App Studio releases and forwards scoped GHCR credentials", async () => {
+  const archive = Buffer.from("gzip archive").toString("base64");
+  const projectId = "0123456789abcdef01234567";
+  const digest = "a".repeat(64);
+  const credentialValue = JSON.stringify({ username: "testowner", token: "secret-token" });
+  const requests: Array<{ url: string; body?: Record<string, unknown> }> = [];
+  const fetchImpl: typeof fetch = async (input, init) => {
+    const url = input instanceof Request ? input.url : input.toString();
+    const body = typeof init?.body === "string"
+      ? JSON.parse(init.body) as Record<string, unknown>
+      : undefined;
+    requests.push({ url, ...(body ? { body } : {}) });
+    if (url.endsWith("/runtimes/agent/heartbeat")) return new Response(null, { status: 204 });
+    if (url.endsWith("/runtimes/agent/commands/claim")) {
+      return Response.json({
+        command: {
+          id: "0123456789abcdef01234567",
+          operation: "appstudio.build",
+          leaseToken: "L".repeat(43),
+          payload: {
+            projectId,
+            appId: "example.notes",
+            version: "1.0.0",
+            digest,
+            archive,
+            localImage: `localhost/magent/example-notes:1.0.0-${digest.slice(0, 24)}`,
+            registryImage: "ghcr.io/testowner/notes:1.0.0",
+            registryCredentialId: "abcdefabcdefabcdefabcdef",
+          },
+        },
+      });
+    }
+    if (url.endsWith("/credentials/agent/abcdefabcdefabcdefabcdef")) {
+      return Response.json({ value: credentialValue });
+    }
+    return new Response(null, { status: 204 });
+  };
+  let buildInput: { registryCredential?: string; archive: Buffer } | undefined;
+  const client = new RuntimeAgentClient("https://mაგენტ.example.test", "T".repeat(43), fetchImpl);
+  const agent = new RuntimeAgent({
+    client,
+    version: "test-agent",
+    applicationEngine: {
+      execute: async () => ({ applicationId: "unused", status: "active" }),
+      buildAppStudioImage: async (input) => {
+        buildInput = {
+          archive: input.archive,
+          ...(input.registryCredential ? { registryCredential: input.registryCredential } : {}),
+        };
+        return {
+          projectId,
+          appId: "example.notes",
+          version: "1.0.0",
+          digest,
+          localImage: `localhost/magent/example-notes:1.0.0-${digest.slice(0, 24)}`,
+          registryImage: "ghcr.io/testowner/notes:1.0.0",
+          registryDigest: `sha256:${"a".repeat(64)}`,
+          logs: "Build complete.",
+        };
+      },
+    },
+  });
+
+  assert.equal(await agent.runOnce(60_000), true);
+  assert.equal(buildInput?.registryCredential, credentialValue);
+  assert.equal(Buffer.isBuffer(buildInput?.archive), true);
+  const acknowledgement = requests.find(({ url }) => url.endsWith("/acknowledge"))?.body;
+  assert.equal(acknowledgement?.status, "succeeded");
+  assert.equal(JSON.stringify(acknowledgement).includes("secret-token"), false);
+  assert.ok(requests.some(({ url }) => url.endsWith("/credentials/agent/abcdefabcdefabcdefabcdef")));
+});
+
 test("Runtime Agent relays MAP requests through the outbound API connection", async () => {
   const portProbe = createServer();
   portProbe.listen(0, "127.0.0.1");

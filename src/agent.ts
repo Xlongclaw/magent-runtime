@@ -4,6 +4,8 @@ import { statfs } from "node:fs/promises";
 import {
   RuntimeAgentApiError,
   RuntimeAgentClient,
+  type AppStudioBuildPayload,
+  type AppStudioCommandPayload,
   type ApplicationCommand,
   type ApplicationLogsCommand,
   type LeasedCommand,
@@ -17,6 +19,10 @@ import {
   mapActionRequestSchema,
   mapManifestSchema,
 } from "@magent/map-protocol";
+import {
+  appStudioBuildPayloadSchema,
+  appStudioCommandPayloadSchema,
+} from "@magent/runtime-protocol";
 
 const LEGACY_SECRET_GENERATION = "000000000000000000000000";
 
@@ -24,6 +30,7 @@ export interface RuntimeAgentOptions {
   client: RuntimeAgentClient;
   version: string;
   applicationEngine?: Pick<PodmanApplicationEngine, "execute"> &
+    Partial<Pick<PodmanApplicationEngine, "buildAppStudioImage" | "executeAppStudioCommand">> &
     Partial<Pick<PodmanApplicationEngine, "inspect" | "logs" | "invokeMapAction" | "deliverMapEvent">>;
   pollIntervalMs?: number;
   heartbeatIntervalMs?: number;
@@ -38,6 +45,7 @@ export class RuntimeAgent {
   private readonly mapProxyPort: number;
   private mapProxyServer: Server | null = null;
   private readonly applicationEngine: Pick<PodmanApplicationEngine, "execute"> &
+    Partial<Pick<PodmanApplicationEngine, "buildAppStudioImage" | "executeAppStudioCommand">> &
     Partial<Pick<PodmanApplicationEngine, "inspect" | "logs" | "invokeMapAction" | "deliverMapEvent">>;
 
   constructor(private readonly options: RuntimeAgentOptions) {
@@ -63,6 +71,16 @@ export class RuntimeAgent {
     }
 
     let result;
+    const heartbeatTimer = command.operation === "appstudio.build" ||
+      command.operation === "appstudio.command"
+      ? setInterval(() => {
+          void this.options.client.heartbeat().catch((error: unknown) => {
+            this.options.onError?.(
+              error instanceof Error ? error : new Error("Runtime heartbeat failed during App Studio work."),
+            );
+          });
+        }, this.heartbeatIntervalMs)
+      : null;
     try {
       if (command.operation === "runtime.inspect") {
         result = await collectRuntimeInspection(
@@ -102,6 +120,33 @@ export class RuntimeAgent {
           token,
           mapCommand.payload.event,
         );
+      } else if (command.operation === "appstudio.build") {
+        const build = parseAppStudioBuildPayload(command.payload);
+        if (!this.applicationEngine.buildAppStudioImage) {
+          throw new Error("App Studio image builds are not available in this runtime agent.");
+        }
+        const registryCredential = build.registryCredentialId
+          ? await this.options.client.getRuntimeCredential(build.registryCredentialId)
+          : undefined;
+        result = await this.applicationEngine.buildAppStudioImage({
+          projectId: build.projectId,
+          appId: build.appId,
+          version: build.version,
+          digest: build.digest,
+          localImage: build.localImage,
+          archive: decodeAppStudioArchive(build.archive),
+          ...(build.registryImage ? { registryImage: build.registryImage } : {}),
+          ...(registryCredential ? { registryCredential } : {}),
+        });
+      } else if (command.operation === "appstudio.command") {
+        const terminal = parseAppStudioCommandPayload(command.payload);
+        if (!this.applicationEngine.executeAppStudioCommand) {
+          throw new Error("The isolated App Studio terminal is not available in this runtime agent.");
+        }
+        result = await this.applicationEngine.executeAppStudioCommand({
+          ...terminal,
+          archive: decodeAppStudioArchive(terminal.archive),
+        });
       } else {
         const applicationCommand = parseApplicationCommand(command);
         const mapToken = await this.options.client.getMapToken(
@@ -126,9 +171,11 @@ export class RuntimeAgent {
       }
     } catch (error) {
       const message = error instanceof Error ? error.message : "Runtime command failed.";
+      if (heartbeatTimer) clearInterval(heartbeatTimer);
       await this.options.client.acknowledgeFailure(command, message);
       return true;
     }
+    if (heartbeatTimer) clearInterval(heartbeatTimer);
     await this.options.client.acknowledgeSuccess(command, result);
     return true;
   }
@@ -261,6 +308,32 @@ function parseApplicationLogsCommand(command: {
       tail: command.payload.tail,
     },
   };
+}
+
+function parseAppStudioBuildPayload(value: Record<string, unknown> | undefined): AppStudioBuildPayload {
+  const parsed = appStudioBuildPayloadSchema.safeParse(value);
+  if (!parsed.success) throw new Error("App Studio image build payload is invalid.");
+  return parsed.data;
+}
+
+function parseAppStudioCommandPayload(value: Record<string, unknown> | undefined): AppStudioCommandPayload {
+  const parsed = appStudioCommandPayloadSchema.safeParse(value);
+  if (!parsed.success) throw new Error("App Studio terminal payload is invalid.");
+  return parsed.data;
+}
+
+function decodeAppStudioArchive(encoded: string): Buffer {
+  if (
+    encoded.length > 1_000_000 ||
+    !/^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/.test(encoded)
+  ) {
+    throw new Error("App Studio source package encoding is invalid.");
+  }
+  const archive = Buffer.from(encoded, "base64");
+  if (archive.length === 0 || archive.length > 750_000 || archive.toString("base64") !== encoded) {
+    throw new Error("App Studio source package exceeds its allowed size or has invalid encoding.");
+  }
+  return archive;
 }
 
 function parseMapActionCommand(command: LeasedCommand): MapActionCommand {
