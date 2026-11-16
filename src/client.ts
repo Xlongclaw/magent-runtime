@@ -5,6 +5,8 @@ import type {
   AppStudioBuildPayload,
   AppStudioCommandPayload,
   AppStudioCommandResult,
+  WorkflowCodePayload,
+  WorkflowCodeResult,
   ApplicationCommand,
   ApplicationCredential,
   ApplicationLifecycleResult,
@@ -23,6 +25,8 @@ export type {
   AppStudioBuildPayload,
   AppStudioCommandPayload,
   AppStudioCommandResult,
+  WorkflowCodePayload,
+  WorkflowCodeResult,
   ApplicationCommand,
   ApplicationCredential,
   ApplicationLifecycleResult,
@@ -182,7 +186,7 @@ export class RuntimeAgentClient {
   async acknowledgeSuccess(
     command: LeasedCommand,
     result: RuntimeInspection | ApplicationLifecycleResult | ApplicationLogsResult |
-      MapCommandResult | AppStudioBuildResult | AppStudioCommandResult,
+      MapCommandResult | AppStudioBuildResult | AppStudioCommandResult | WorkflowCodeResult,
   ): Promise<void> {
     const response = await this.request(
       `/runtimes/agent/commands/${encodeURIComponent(command.id)}/acknowledge`,

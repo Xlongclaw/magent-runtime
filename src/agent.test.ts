@@ -295,6 +295,63 @@ test("Runtime Agent builds App Studio releases and forwards scoped GHCR credenti
   assert.ok(requests.some(({ url }) => url.endsWith("/credentials/agent/abcdefabcdefabcdefabcdef")));
 });
 
+test("Runtime Agent executes workflow code through its isolated code sandbox", async () => {
+  const commandPayload = {
+    executionId: "0123456789abcdef01234567",
+    workflowId: "abcdefabcdefabcdefabcdef",
+    nodeId: "code-1",
+    source: "return { total: input.left + nodes.previous.output.right };",
+    context: { input: { left: 2 }, nodes: { previous: { output: { right: 3 } } } },
+  };
+  const requests: Array<{ url: string; body?: Record<string, unknown> }> = [];
+  const fetchImpl: typeof fetch = async (input, init) => {
+    const url = input instanceof Request ? input.url : input.toString();
+    const body = typeof init?.body === "string"
+      ? JSON.parse(init.body) as Record<string, unknown>
+      : undefined;
+    requests.push({ url, ...(body ? { body } : {}) });
+    if (url.endsWith("/runtimes/agent/heartbeat")) return new Response(null, { status: 204 });
+    if (url.endsWith("/runtimes/agent/commands/claim")) {
+      return Response.json({
+        command: {
+          id: "0123456789abcdef01234567",
+          operation: "workflow.code",
+          leaseToken: "L".repeat(43),
+          payload: commandPayload,
+        },
+      });
+    }
+    return new Response(null, { status: 204 });
+  };
+  let sandboxInput: unknown;
+  const client = new RuntimeAgentClient("https://mაგენტ.example.test", "T".repeat(43), fetchImpl);
+  const agent = new RuntimeAgent({
+    client,
+    version: "test-agent",
+    applicationEngine: {
+      execute: async () => ({ applicationId: "unused", status: "active" }),
+      executeWorkflowCode: async (input) => {
+        sandboxInput = input;
+        return {
+          executionId: input.executionId,
+          nodeId: input.nodeId,
+          output: { total: 5 },
+        };
+      },
+    },
+  });
+
+  assert.equal(await agent.runOnce(60_000), true);
+  assert.deepEqual(sandboxInput, commandPayload);
+  const acknowledgement = requests.find(({ url }) => url.endsWith("/acknowledge"))?.body;
+  assert.equal(acknowledgement?.status, "succeeded");
+  assert.deepEqual(acknowledgement?.result, {
+    executionId: commandPayload.executionId,
+    nodeId: commandPayload.nodeId,
+    output: { total: 5 },
+  });
+});
+
 test("Runtime Agent relays MAP requests through the outbound API connection", async () => {
   const portProbe = createServer();
   portProbe.listen(0, "127.0.0.1");

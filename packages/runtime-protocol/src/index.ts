@@ -24,6 +24,7 @@ export const runtimeCommandOperations = {
   configure: "app.configure",
   appStudioBuild: "appstudio.build",
   appStudioCommand: "appstudio.command",
+  workflowCode: "workflow.code",
 } as const;
 
 export const agentCommandOperationSchema = z.nativeEnum(runtimeCommandOperations);
@@ -76,6 +77,29 @@ export const appStudioCommandResultSchema = z.object({
   output: z.string().max(65_536),
   exitCode: z.number().int().min(0).max(255),
   truncated: z.boolean(),
+}).strict();
+
+const boundedJsonSchema = (limit: number) => z.unknown().refine((value) => {
+  try {
+    const serialized = JSON.stringify(value);
+    return typeof serialized === "string" && new TextEncoder().encode(serialized).byteLength <= limit;
+  } catch {
+    return false;
+  }
+});
+
+export const workflowCodePayloadSchema = z.object({
+  executionId: z.string().regex(/^[a-f\d]{24}$/i),
+  workflowId: z.string().regex(/^[a-f\d]{24}$/i),
+  nodeId: z.string().regex(/^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$/),
+  source: z.string().min(1).max(20_000),
+  context: boundedJsonSchema(65_536),
+}).strict();
+
+export const workflowCodeResultSchema = z.object({
+  executionId: z.string().regex(/^[a-f\d]{24}$/i),
+  nodeId: z.string().regex(/^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$/),
+  output: boundedJsonSchema(262_144),
 }).strict();
 
 export const runtimeInspectionResultSchema = z.object({
@@ -133,6 +157,8 @@ export type AppStudioBuildPayload = z.infer<typeof appStudioBuildPayloadSchema>;
 export type AppStudioCommandPayload = z.infer<typeof appStudioCommandPayloadSchema>;
 export type AppStudioBuildResult = z.infer<typeof appStudioBuildResultSchema>;
 export type AppStudioCommandResult = z.infer<typeof appStudioCommandResultSchema>;
+export type WorkflowCodePayload = z.infer<typeof workflowCodePayloadSchema>;
+export type WorkflowCodeResult = z.infer<typeof workflowCodeResultSchema>;
 
 export interface ApplicationCredential {
   credentialId: string;

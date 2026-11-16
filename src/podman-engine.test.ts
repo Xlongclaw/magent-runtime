@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { spawn } from "node:child_process";
 import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -187,6 +188,73 @@ test("App Studio terminal runs a temporary source copy in a rootless, networkles
   }
   assert.equal(run.args.at(-1), "node --test");
   assert.equal(run.options.timeout, 60_000);
+});
+
+test("workflow code runs without network, host mounts, or elevated container privileges", async () => {
+  const calls: Array<{ args: string[]; input?: string | Uint8Array; timeout: number }> = [];
+  const runner: PodmanCommandRunner = async (_executable, args, options) => {
+    calls.push({
+      args,
+      timeout: options.timeout,
+      ...(options.input !== undefined ? { input: options.input } : {}),
+    });
+    if (args[0] === "info") return { stdout: "true\n", stderr: "" };
+    if (args[0] === "run") {
+      assert.equal(typeof options.input, "string");
+      const payload = JSON.parse(String(options.input)) as { source: string };
+      assert.equal(typeof payload.source, "string");
+      const script = args.at(-1);
+      assert.ok(script);
+      return await new Promise<{ stdout: string; stderr: string }>((resolve, reject) => {
+        const child = spawn(process.execPath, ["-e", script]);
+        let stdout = "";
+        let stderr = "";
+        child.stdout.setEncoding("utf8").on("data", (chunk: string) => { stdout += chunk; });
+        child.stderr.setEncoding("utf8").on("data", (chunk: string) => { stderr += chunk; });
+        child.on("error", reject);
+        child.on("close", (code) => {
+          if (code === 0) resolve({ stdout, stderr });
+          else reject(new Error(stderr || `Sandbox runner exited with code ${code}.`));
+        });
+        child.stdin.end(options.input);
+      });
+    }
+    return { stdout: "", stderr: "" };
+  };
+  const engine = new PodmanApplicationEngine("podman-test", runner);
+  const result = await engine.executeWorkflowCode({
+    executionId: "0123456789abcdef01234567",
+    workflowId: "abcdefabcdefabcdefabcdef",
+    nodeId: "code-1",
+    source: "return { value: input.count + 1 };",
+    context: { input: { count: 2 }, nodes: {} },
+  });
+  assert.deepEqual(result.output, { value: 3 });
+  const run = calls.find(({ args }) => args[0] === "run");
+  assert.ok(run);
+  for (const requiredFlag of [
+    "--timeout=15",
+    "--network=none",
+    "--read-only",
+    "--cap-drop=ALL",
+    "--security-opt=no-new-privileges",
+    "--pids-limit=32",
+    "--memory=128m",
+    "--cpus=1",
+    "--userns=keep-id",
+  ]) {
+    assert.ok(run.args.includes(requiredFlag), `missing workflow sandbox flag ${requiredFlag}`);
+  }
+  assert.equal(run.args.some((argument) => argument.startsWith("--volume=")), false);
+  assert.equal(run.timeout, 20_000);
+  const hiddenRuntimeState = await engine.executeWorkflowCode({
+    executionId: "0123456789abcdef01234567",
+    workflowId: "abcdefabcdefabcdefabcdef",
+    nodeId: "code-1",
+    source: "return typeof process;",
+    context: { input: {}, nodes: {} },
+  });
+  assert.equal(hiddenRuntimeState.output, "undefined");
 });
 
 test("Podman lifecycle uses rootless, isolated containers and preserves app storage", async () => {

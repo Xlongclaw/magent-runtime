@@ -7,6 +7,8 @@ import { gunzipSync } from "node:zlib";
 import type {
   AppStudioBuildResult,
   AppStudioCommandResult,
+  WorkflowCodePayload,
+  WorkflowCodeResult,
   ApplicationCommand,
   ApplicationCredential,
   ApplicationLogsResult,
@@ -19,12 +21,17 @@ import type {
   MapActionResult,
   MapManifest,
 } from "@magent/map-protocol";
+import {
+  workflowCodePayloadSchema,
+  workflowCodeResultSchema,
+} from "@magent/runtime-protocol";
 
 const appIdPattern = /^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?(?:\.[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?)*$/;
 const imagePattern = /^(?:(?:[a-z0-9]+(?:[.-][a-z0-9]+)*(?::[0-9]{1,5})?\/)?[a-z0-9]+(?:[._-][a-z0-9]+)*(?:\/[a-z0-9]+(?:[._-][a-z0-9]+)*)*)(?::[A-Za-z0-9_][A-Za-z0-9_.-]{0,127}|@sha256:[a-f0-9]{64})$/;
 const MAX_LOG_BYTES = 65_536;
 const APP_STUDIO_TERMINAL_IMAGE = "docker.io/library/node:22-alpine";
 const APP_STUDIO_LOCAL_IMAGE_PREFIX = "localhost/magent/";
+const WORKFLOW_CODE_RUNNER = `const fs=require("node:fs");const vm=require("node:vm");const payload=JSON.parse(fs.readFileSync(0,"utf8"));const timer=setTimeout(()=>{process.stderr.write("Workflow code exceeded its execution deadline.\\n");process.exit(124)},10000);const sandbox=vm.createContext({contextJson:JSON.stringify(payload.context),source:payload.source},{codeGeneration:{strings:false,wasm:false}});(async()=>{const result=await vm.runInContext("(async()=>{const {input,nodes}=JSON.parse(contextJson);\\n"+payload.source+"\\n})()",sandbox,{timeout:5000});const output=JSON.stringify(result);if(typeof output!=="string")throw new Error("Workflow code must return a JSON value.");if(Buffer.byteLength(output)>262144)throw new Error("Workflow code output exceeded 256 KiB.");process.stdout.write(JSON.stringify({executionId:payload.executionId,nodeId:payload.nodeId,output:JSON.parse(output)}));clearTimeout(timer)})().catch(error=>{process.stderr.write(String(error&&error.message||"Workflow code failed.").slice(0,1000));process.exitCode=1;clearTimeout(timer)})`;
 
 export interface PodmanCommandRunner {
   (executable: string, args: string[], options: {
@@ -266,6 +273,53 @@ export class PodmanApplicationEngine {
     } finally {
       await rm(directory, { recursive: true, force: true });
     }
+  }
+
+  async executeWorkflowCode(input: WorkflowCodePayload): Promise<WorkflowCodeResult> {
+    const parsed = workflowCodePayloadSchema.safeParse(input);
+    if (!parsed.success) throw new Error("Workflow code command is invalid.");
+    await this.ensureRootlessPodman();
+    await this.ensureTerminalImage();
+    const { stdout } = await this.run(this.executable, [
+      "run",
+      "--rm",
+      "--timeout=15",
+      "--network=none",
+      "--read-only",
+      "--cap-drop=ALL",
+      "--security-opt=no-new-privileges",
+      "--pids-limit=32",
+      "--memory=128m",
+      "--cpus=1",
+      "--userns=keep-id",
+      "--tmpfs=/tmp:rw,noexec,nosuid,size=16m",
+      "--env=PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
+      "--env=HOME=/tmp",
+      "--workdir=/tmp",
+      APP_STUDIO_TERMINAL_IMAGE,
+      "node",
+      "-e",
+      WORKFLOW_CODE_RUNNER,
+    ], {
+      timeout: 20_000,
+      maxBuffer: 512 * 1024,
+      input: JSON.stringify(parsed.data),
+    });
+    let result: unknown;
+    try {
+      result = JSON.parse(stdout) as unknown;
+    } catch {
+      throw new Error("Workflow code sandbox returned invalid JSON.");
+    }
+    const validated = workflowCodeResultSchema.safeParse(result);
+    if (
+      !validated.success ||
+      validated.data.executionId !== parsed.data.executionId ||
+      validated.data.nodeId !== parsed.data.nodeId
+    ) {
+      throw new Error("Workflow code sandbox returned an invalid result.");
+    }
+    return validated.data;
   }
 
     async invokeMapAction(

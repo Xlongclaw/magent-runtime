@@ -22,6 +22,7 @@ import {
 import {
   appStudioBuildPayloadSchema,
   appStudioCommandPayloadSchema,
+  workflowCodePayloadSchema,
 } from "@magent/runtime-protocol";
 
 const LEGACY_SECRET_GENERATION = "000000000000000000000000";
@@ -30,7 +31,7 @@ export interface RuntimeAgentOptions {
   client: RuntimeAgentClient;
   version: string;
   applicationEngine?: Pick<PodmanApplicationEngine, "execute"> &
-    Partial<Pick<PodmanApplicationEngine, "buildAppStudioImage" | "executeAppStudioCommand">> &
+    Partial<Pick<PodmanApplicationEngine, "buildAppStudioImage" | "executeAppStudioCommand" | "executeWorkflowCode">> &
     Partial<Pick<PodmanApplicationEngine, "inspect" | "logs" | "invokeMapAction" | "deliverMapEvent">>;
   pollIntervalMs?: number;
   heartbeatIntervalMs?: number;
@@ -45,7 +46,7 @@ export class RuntimeAgent {
   private readonly mapProxyPort: number;
   private mapProxyServer: Server | null = null;
   private readonly applicationEngine: Pick<PodmanApplicationEngine, "execute"> &
-    Partial<Pick<PodmanApplicationEngine, "buildAppStudioImage" | "executeAppStudioCommand">> &
+    Partial<Pick<PodmanApplicationEngine, "buildAppStudioImage" | "executeAppStudioCommand" | "executeWorkflowCode">> &
     Partial<Pick<PodmanApplicationEngine, "inspect" | "logs" | "invokeMapAction" | "deliverMapEvent">>;
 
   constructor(private readonly options: RuntimeAgentOptions) {
@@ -72,7 +73,8 @@ export class RuntimeAgent {
 
     let result;
     const heartbeatTimer = command.operation === "appstudio.build" ||
-      command.operation === "appstudio.command"
+      command.operation === "appstudio.command" ||
+      command.operation === "workflow.code"
       ? setInterval(() => {
           void this.options.client.heartbeat().catch((error: unknown) => {
             this.options.onError?.(
@@ -147,6 +149,12 @@ export class RuntimeAgent {
           ...terminal,
           archive: decodeAppStudioArchive(terminal.archive),
         });
+      } else if (command.operation === "workflow.code") {
+        const code = workflowCodePayloadSchema.safeParse(command.payload);
+        if (!code.success || !this.applicationEngine.executeWorkflowCode) {
+          throw new Error("Workflow code sandbox is not available in this runtime agent.");
+        }
+        result = await this.applicationEngine.executeWorkflowCode(code.data);
       } else {
         const applicationCommand = parseApplicationCommand(command);
         const mapToken = await this.options.client.getMapToken(
