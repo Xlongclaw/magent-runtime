@@ -163,6 +163,7 @@ test("Runtime Agent delegates app lifecycle commands to its container engine and
       memoryMb: 512,
       environment: { MODE: "test" },
       credentialIds: ["abcdefabcdefabcdefabcdef"],
+      grantedPermissions: [],
       credentials: [{
         credentialId: "abcdefabcdefabcdefabcdef",
         value: "do-not-log-this",

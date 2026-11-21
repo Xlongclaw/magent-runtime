@@ -35,6 +35,7 @@ const imagePattern = /^(?:(?:[a-z0-9]+(?:[.-][a-z0-9]+)*(?::[0-9]{1,5})?\/)?[a-z
 const MAX_LOG_BYTES = 65_536;
 const APP_STUDIO_TERMINAL_IMAGE = "docker.io/library/node:22-alpine";
 const APP_STUDIO_LOCAL_IMAGE_PREFIX = "localhost/magent/";
+const OUTBOUND_NETWORK_PERMISSION = "network.outbound";
 const WORKFLOW_CODE_RUNNER = `const fs=require("node:fs");const vm=require("node:vm");const payload=JSON.parse(fs.readFileSync(0,"utf8"));const timer=setTimeout(()=>{process.stderr.write("Workflow code exceeded its execution deadline.\\n");process.exit(124)},10000);const sandbox=vm.createContext({contextJson:JSON.stringify(payload.context),source:payload.source},{codeGeneration:{strings:false,wasm:false}});(async()=>{const result=await vm.runInContext("(async()=>{const {input,nodes}=JSON.parse(contextJson);\\n"+payload.source+"\\n})()",sandbox,{timeout:5000});const output=JSON.stringify(result);if(typeof output!=="string")throw new Error("Workflow code must return a JSON value.");if(Buffer.byteLength(output)>262144)throw new Error("Workflow code output exceeded 256 KiB.");process.stdout.write(JSON.stringify({executionId:payload.executionId,nodeId:payload.nodeId,output:JSON.parse(output)}));clearTimeout(timer)})().catch(error=>{process.stderr.write(String(error&&error.message||"Workflow code failed.").slice(0,1000));process.exitCode=1;clearTimeout(timer)})`;
 
 export interface PodmanCommandRunner {
@@ -79,6 +80,7 @@ export class PodmanApplicationEngine {
           this.requiredEnvironment(command.payload.environment),
           this.requiredCredentials(command.payload.credentialIds, command.payload.credentials),
           command.payload.manifest,
+          command.payload.grantedPermissions,
           command.payload.mapToken,
         );
         return { applicationId: appId, status: "active" };
@@ -113,6 +115,8 @@ export class PodmanApplicationEngine {
           ),
           this.requiredGeneration(command.payload.previousSecretGeneration),
           command.payload.manifest,
+          command.payload.grantedPermissions,
+          command.payload.previousGrantedPermissions,
           command.payload.mapToken,
         );
         return { applicationId: appId, status: "active" };
@@ -169,7 +173,8 @@ export class PodmanApplicationEngine {
       "build",
       "--pull=missing",
       "--memory=512m",
-      "--cpus=2",
+      "--cpu-period=100000",
+      "--cpu-quota=200000",
       ...tags,
       "--file=Dockerfile",
       "-",
@@ -514,6 +519,7 @@ export class PodmanApplicationEngine {
     environment: Record<string, string>,
     credentials: ApplicationCredential[],
     manifest?: MapManifest,
+    grantedPermissions: string[] = [],
     mapToken?: string,
   ): Promise<void> {
     await this.ensureVolume(appId);
@@ -526,7 +532,10 @@ export class PodmanApplicationEngine {
     await this.ensureImage(image);
     await this.createSecrets(appId, generation, credentials);
     try {
-      await this.runContainer(appId, generation, image, cpuCount, memoryMb, environment, credentials, manifest, mapToken);
+      await this.runContainer(
+        appId, generation, image, cpuCount, memoryMb, environment, credentials, manifest,
+        grantedPermissions, mapToken,
+      );
     } catch (error) {
       try {
         await this.removeSecrets(appId, generation, credentials.map(({ credentialId }) => credentialId));
@@ -552,6 +561,8 @@ export class PodmanApplicationEngine {
     previousCredentials: ApplicationCredential[],
     previousGeneration: string,
     manifest?: MapManifest,
+    grantedPermissions: string[] = [],
+    previousGrantedPermissions: string[] = [],
     mapToken?: string,
   ): Promise<void> {
     await this.requireContainer(appId);
@@ -573,7 +584,10 @@ export class PodmanApplicationEngine {
       throw error;
     }
     try {
-      await this.runContainer(appId, generation, image, cpuCount, memoryMb, environment, credentials, manifest, mapToken);
+      await this.runContainer(
+        appId, generation, image, cpuCount, memoryMb, environment, credentials, manifest,
+        grantedPermissions, mapToken,
+      );
     } catch (error) {
       let cleanupError: unknown;
       try {
@@ -591,6 +605,7 @@ export class PodmanApplicationEngine {
           previousEnvironment,
           previousCredentials,
           manifest,
+          previousGrantedPermissions,
           mapToken,
         );
       } catch (rollbackError) {
@@ -628,8 +643,11 @@ export class PodmanApplicationEngine {
     if (await this.exists(["volume", "exists", this.volumeName(appId)])) {
       await this.command(["volume", "rm", this.volumeName(appId)]);
     }
-    if (await this.exists(["network", "exists", this.networkName(appId)])) {
-      await this.command(["network", "rm", this.networkName(appId)]);
+    for (const allowOutbound of [false, true]) {
+      const network = this.networkName(appId, allowOutbound);
+      if (await this.exists(["network", "exists", network])) {
+        await this.command(["network", "rm", network]);
+      }
     }
   }
 
@@ -691,13 +709,19 @@ export class PodmanApplicationEngine {
     environment: Record<string, string>,
     credentials: ApplicationCredential[],
     manifest?: MapManifest,
+    grantedPermissions: string[] = [],
     mapToken?: string,
   ): Promise<void> {
     if (manifest && (!mapToken || !/^[A-Za-z0-9_-]{43}$/.test(mapToken))) {
       throw new Error("MAP application token is unavailable.");
     }
     if (manifest) {
-      await this.ensureNetwork(appId);
+      const outboundRequested = manifest.requestedPermissions.includes(OUTBOUND_NETWORK_PERMISSION);
+      const outboundGranted = grantedPermissions.includes(OUTBOUND_NETWORK_PERMISSION);
+      if (outboundGranted && !outboundRequested) {
+        throw new Error("Outbound network access was granted but not requested by the MAP manifest.");
+      }
+      await this.ensureNetwork(appId, outboundGranted);
       const name = this.mapSecretName(appId, generation);
       if (await this.exists(["secret", "exists", name])) {
         await this.command(["secret", "rm", name]);
@@ -713,7 +737,9 @@ export class PodmanApplicationEngine {
       `--label=magent.app-id=${appId}`,
       `--label=magent.secret-generation=${generation}`,
       ...(manifest ? [`--entrypoint=${manifest.runtime.entrypoint}`] : []),
-      manifest ? `--network=${this.networkName(appId)}` : "--network=none",
+      manifest
+        ? `--network=${this.networkName(appId, grantedPermissions.includes(OUTBOUND_NETWORK_PERMISSION))}`
+        : "--network=none",
       ...(manifest ? [`--publish=127.0.0.1::${manifest.runtime.port}/tcp`] : []),
       "--read-only",
       "--cap-drop=ALL",
@@ -761,10 +787,15 @@ export class PodmanApplicationEngine {
     throw new Error("Application container exited before it became active.");
   }
 
-  private async ensureNetwork(appId: string): Promise<void> {
-    const name = this.networkName(appId);
+  private async ensureNetwork(appId: string, allowOutbound: boolean): Promise<void> {
+    const name = this.networkName(appId, allowOutbound);
     if (!(await this.exists(["network", "exists", name]))) {
-      await this.command(["network", "create", "--internal", name]);
+      await this.command([
+        "network",
+        "create",
+        ...(allowOutbound ? [] : ["--internal"]),
+        name,
+      ]);
     }
   }
 
@@ -1003,8 +1034,8 @@ export class PodmanApplicationEngine {
     return `magent-${this.appNameComponent(appId)}-${generation}-map-token`;
   }
 
-  private networkName(appId: string): string {
-    return `magent-net-${this.appNameComponent(appId)}`;
+  private networkName(appId: string, allowOutbound: boolean): string {
+    return `magent-net-${this.appNameComponent(appId)}${allowOutbound ? "-outbound" : ""}`;
   }
 
   private appNameComponent(appId: string): string {

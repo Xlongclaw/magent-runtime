@@ -457,6 +457,7 @@ function parseApplicationCommand(command: {
     parsedPayload.credentialIds = parseCredentialIds(
       payload.credentialIds === undefined ? [] : payload.credentialIds,
     );
+    parsedPayload.grantedPermissions = parseGrantedPermissions(payload.grantedPermissions);
   }
   if (
     operation === "app.update" ||
@@ -479,6 +480,7 @@ function parseApplicationCommand(command: {
     parsedPayload.previousCredentialIds = parseCredentialIds(
       payload.previousCredentialIds === undefined ? [] : payload.previousCredentialIds,
     );
+    parsedPayload.previousGrantedPermissions = parseGrantedPermissions(payload.previousGrantedPermissions);
     if (
       typeof payload.previousImage !== "string" ||
       (payload.previousSecretGeneration !== undefined &&
@@ -571,6 +573,23 @@ function parseCredentialIds(value: unknown): string[] {
     new Set(value).size !== value.length
   ) {
     throw new Error("Application credential grants are invalid.");
+  }
+  return value;
+}
+
+function parseGrantedPermissions(value: unknown): string[] {
+  if (value === undefined) return [];
+  if (
+    !Array.isArray(value) ||
+    value.length > 100 ||
+    value.some((permission) =>
+      typeof permission !== "string" ||
+      !/^[A-Za-z][A-Za-z0-9_-]*(?:\.[A-Za-z0-9_-]+)*$/.test(permission) ||
+      permission.length > 64,
+    ) ||
+    new Set(value).size !== value.length
+  ) {
+    throw new Error("Application permission grants are invalid.");
   }
   return value;
 }

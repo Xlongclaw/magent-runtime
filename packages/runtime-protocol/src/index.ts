@@ -206,9 +206,11 @@ export interface ApplicationCommand extends LeasedCommand {
     environment?: Record<string, string>;
     credentialIds?: string[];
     credentials?: ApplicationCredential[];
+    grantedPermissions?: string[];
     previousEnvironment?: Record<string, string>;
     previousCredentialIds?: string[];
     previousCredentials?: ApplicationCredential[];
+    previousGrantedPermissions?: string[];
     previousSecretGeneration?: string;
     manifest?: MapManifest;
     mapToken?: string;

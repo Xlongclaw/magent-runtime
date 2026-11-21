@@ -542,7 +542,7 @@ test("Podman returns bounded logs only from the named managed application contai
   await assert.rejects(engine.logs("demo-app", 501), /line limit is invalid/);
 });
 
-test("MAP containers use an internal network, loopback-only ports, and relay actions with the app token", async () => {
+test("MAP containers use internal networks unless outbound access is explicitly granted", async () => {
   const calls: string[][] = [];
   const networks = new Set<string>();
   const secrets = new Set<string>();
@@ -584,7 +584,7 @@ test("MAP containers use an internal network, loopback-only ports, and relay act
     }
     if (args[0] === "secret" && args[1] === "create") {
       secrets.add(args[2] ?? "");
-      assert.equal(options.input, "M".repeat(43));
+      assert.match(String(options.input), /^[MN]{43}$/);
       return { stdout: "", stderr: "" };
     }
     if (args[0] === "run") return { stdout: "", stderr: "" };
@@ -630,6 +630,32 @@ test("MAP containers use an internal network, loopback-only ports, and relay act
     assert.ok(run.some((arg) => arg.includes("target=/run/secrets/magent-map-token")));
     assert.ok(run.includes("--env=MAGENT_MAP_URL=http://host.containers.internal:4317"));
     assert.equal(networks.has("magent-net-com.example.tasks"), true);
+    const internalNetwork = calls.find((args) =>
+      args[0] === "network" && args[1] === "create" && args.at(-1) === "magent-net-com.example.tasks",
+    );
+    assert.ok(internalNetwork?.includes("--internal"));
+
+    const outboundManifest = {
+      ...manifest,
+      id: "com.example.mail",
+      requestedPermissions: ["network.outbound"],
+    };
+    await engine.execute(command("app.install", {
+      appId: outboundManifest.id,
+      image: "registry.example.test/team/mail:v1",
+      cpuCount: 1,
+      memoryMb: 512,
+      manifest: outboundManifest,
+      grantedPermissions: ["network.outbound"],
+      mapToken: "N".repeat(43),
+    }));
+    const outboundRun = calls.filter((args) => args[0] === "run").at(-1);
+    assert.ok(outboundRun?.includes("--network=magent-net-com.example.mail-outbound"));
+    const outboundNetwork = calls.find((args) =>
+      args[0] === "network" && args[1] === "create" && args.at(-1) === "magent-net-com.example.mail-outbound",
+    );
+    assert.ok(outboundNetwork);
+    assert.equal(outboundNetwork.includes("--internal"), false);
 
     const action = await engine.invokeMapAction(appId, 4000, "M".repeat(43), {
       requestId: "7f5f80b3-26a6-4273-aa98-903708b8c5c6",
