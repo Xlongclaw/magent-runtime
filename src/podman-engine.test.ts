@@ -552,6 +552,15 @@ test("MAP containers use an internal network, loopback-only ports, and relay act
   globalThis.fetch = async (input, init) => {
     fetchUrl = input instanceof Request ? input.url : input.toString();
     fetchHeaders = new Headers(init?.headers);
+    if (fetchUrl === "http://127.0.0.1:49153/index.html") {
+      return new Response("<main>frontend</main>", {
+        status: 200,
+        headers: {
+          "content-type": "text/html; charset=utf-8",
+          "cache-control": "no-store",
+        },
+      });
+    }
     return Response.json({
       requestId: "7f5f80b3-26a6-4273-aa98-903708b8c5c6",
       output: { id: "created" },
@@ -636,6 +645,22 @@ test("MAP containers use an internal network, loopback-only ports, and relay act
       requestId: "7f5f80b3-26a6-4273-aa98-903708b8c5c6",
       success: true,
       output: { id: "created" },
+    });
+
+    const frontend = await engine.proxyApplicationRequest({
+      appId,
+      port: 4000,
+      path: "/index.html",
+      method: "GET",
+    });
+    assert.equal(fetchUrl, "http://127.0.0.1:49153/index.html");
+    assert.equal(fetchHeaders?.get("authorization"), null);
+    assert.deepEqual(frontend, {
+      applicationId: appId,
+      statusCode: 200,
+      contentType: "text/html; charset=utf-8",
+      cacheControl: "no-store",
+      body: Buffer.from("<main>frontend</main>").toString("base64"),
     });
   } finally {
     globalThis.fetch = originalFetch;

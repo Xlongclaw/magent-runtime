@@ -22,6 +22,7 @@ export const runtimeCommandOperations = {
   uninstall: "app.uninstall",
   rollback: "app.rollback",
   configure: "app.configure",
+  proxy: "app.proxy",
   appStudioBuild: "appstudio.build",
   appStudioCommand: "appstudio.command",
   workflowCode: "workflow.code",
@@ -140,11 +141,40 @@ export const applicationLogsResultSchema = z.object({
   content: z.string().max(65_536),
   truncated: z.boolean(),
 }).strict();
+export const applicationProxyPayloadSchema = z.object({
+  appId: applicationIdSchema,
+  port: z.number().int().min(1).max(65_535),
+  path: z.string().min(1).max(4_096).startsWith("/")
+    .refine((value) => {
+      const pathname = value.split("?", 1)[0] ?? "";
+      let decodedPathname: string;
+      try {
+        decodedPathname = decodeURIComponent(pathname);
+      } catch {
+        return false;
+      }
+      return !value.startsWith("//") && !/[\0\\\r\n]/.test(decodedPathname) &&
+        !decodedPathname.split("/").some((segment) => segment === "." || segment === "..");
+    }),
+  method: z.enum(["GET", "HEAD", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"]),
+  contentType: z.string().max(256).optional(),
+  body: z.string().max(1_000_000).optional(),
+}).strict();
+export const applicationProxyResultSchema = z.object({
+  applicationId: applicationIdSchema,
+  statusCode: z.number().int().min(100).max(599),
+  contentType: z.string().max(256).optional(),
+  location: z.string().max(4_096).optional(),
+  cacheControl: z.string().max(256).optional(),
+  body: z.string().max(3_000_000),
+}).strict();
 
 export type RuntimeInspection = z.infer<typeof runtimeInspectionResultSchema>;
 export type AgentCommandOperation = z.infer<typeof agentCommandOperationSchema>;
 export type ApplicationLifecycleResult = z.infer<typeof applicationLifecycleResultSchema>;
 export type ApplicationLogsResult = z.infer<typeof applicationLogsResultSchema>;
+export type ApplicationProxyPayload = z.infer<typeof applicationProxyPayloadSchema>;
+export type ApplicationProxyResult = z.infer<typeof applicationProxyResultSchema>;
 
 export interface LeasedCommand {
   id: string;
@@ -166,7 +196,7 @@ export interface ApplicationCredential {
 }
 
 export interface ApplicationCommand extends LeasedCommand {
-  operation: Exclude<AgentCommandOperation, "runtime.inspect" | "app.logs">;
+  operation: Exclude<AgentCommandOperation, "runtime.inspect" | "app.logs" | "app.proxy">;
   payload: {
     appId: string;
     image?: string;
@@ -191,6 +221,11 @@ export interface ApplicationLogsCommand extends LeasedCommand {
     appId: string;
     tail: number;
   };
+}
+
+export interface ApplicationProxyCommand extends LeasedCommand {
+  operation: "app.proxy";
+  payload: ApplicationProxyPayload;
 }
 
 export interface MapActionCommand extends LeasedCommand {

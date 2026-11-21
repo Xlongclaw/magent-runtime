@@ -12,6 +12,8 @@ import type {
   ApplicationCommand,
   ApplicationCredential,
   ApplicationLogsResult,
+  ApplicationProxyPayload,
+  ApplicationProxyResult,
   ApplicationLifecycleResult,
   RuntimeInspection,
 } from "./client.js";
@@ -22,6 +24,8 @@ import type {
   MapManifest,
 } from "@magent/map-protocol";
 import {
+  applicationProxyPayloadSchema,
+  applicationProxyResultSchema,
   workflowCodePayloadSchema,
   workflowCodeResultSchema,
 } from "@magent/runtime-protocol";
@@ -398,6 +402,54 @@ export class PodmanApplicationEngine {
         throw new Error(mapErrorMessage(body, response.status));
       }
       return { eventId: event.id };
+    }
+
+    async proxyApplicationRequest(payload: ApplicationProxyPayload): Promise<ApplicationProxyResult> {
+      const parsed = applicationProxyPayloadSchema.safeParse(payload);
+      if (!parsed.success) throw new Error("Application frontend proxy request is invalid.");
+      const request = parsed.data;
+      this.validateAppId(request.appId);
+      const target = new URL(request.path, `http://127.0.0.1:${await this.publishedPort(request.appId, request.port)}`);
+      if (target.hostname !== "127.0.0.1" || target.username || target.password) {
+        throw new Error("Application frontend proxy target is invalid.");
+      }
+
+      let body: Buffer | undefined;
+      if (request.body !== undefined) {
+        if (!/^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/.test(request.body)) {
+          throw new Error("Application frontend proxy body encoding is invalid.");
+        }
+        body = Buffer.from(request.body, "base64");
+        if (body.length > 750 * 1024 || body.toString("base64") !== request.body) {
+          throw new Error("Application frontend proxy request exceeds the allowed size.");
+        }
+      }
+
+      const response = await fetch(target, {
+        method: request.method,
+        ...(body && request.method !== "GET" && request.method !== "HEAD" ? { body: Uint8Array.from(body) } : {}),
+        headers: request.contentType ? { "content-type": request.contentType } : {},
+        redirect: "manual",
+        signal: AbortSignal.timeout(20_000),
+      });
+      const responseBody = await readResponseBuffer(response, 2 * 1024 * 1024);
+      const result = {
+        applicationId: request.appId,
+        statusCode: response.status,
+        ...(response.headers.get("content-type")
+          ? { contentType: response.headers.get("content-type")!.slice(0, 256) }
+          : {}),
+        ...(response.headers.get("location")
+          ? { location: response.headers.get("location")!.slice(0, 4_096) }
+          : {}),
+        ...(response.headers.get("cache-control")
+          ? { cacheControl: response.headers.get("cache-control")!.slice(0, 256) }
+          : {}),
+        body: responseBody.toString("base64"),
+      };
+      const validated = applicationProxyResultSchema.safeParse(result);
+      if (!validated.success) throw new Error("Application frontend proxy response is invalid.");
+      return validated.data;
     }
 
   async inspect(): Promise<RuntimeInspection["applications"]> {
@@ -982,6 +1034,24 @@ async function readResponseJson(response: Response): Promise<unknown> {
   } catch {
     throw new Error("MAP application returned invalid JSON.");
   }
+}
+
+async function readResponseBuffer(response: Response, maxBytes: number): Promise<Buffer> {
+  const reader = response.body?.getReader();
+  if (!reader) return Buffer.alloc(0);
+  const chunks: Uint8Array[] = [];
+  let length = 0;
+  while (true) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    length += value.byteLength;
+    if (length > maxBytes) {
+      await reader.cancel();
+      throw new Error("Application frontend response exceeds the allowed size.");
+    }
+    chunks.push(value);
+  }
+  return Buffer.concat(chunks);
 }
 
 function parseGhcrCredentials(value: string): { username: string; token: string } {

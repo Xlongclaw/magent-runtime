@@ -223,6 +223,65 @@ test("Runtime Agent collects application logs and acknowledges bounded output", 
   });
 });
 
+test("Runtime Agent proxies application frontend requests and acknowledges the response", async () => {
+  const requests: Array<{ url: string; body?: Record<string, unknown> }> = [];
+  const fetchImpl: typeof fetch = async (input, init) => {
+    const url = input instanceof Request ? input.url : input.toString();
+    const body = typeof init?.body === "string"
+      ? JSON.parse(init.body) as Record<string, unknown>
+      : undefined;
+    requests.push({ url, ...(body ? { body } : {}) });
+    if (url.endsWith("/runtimes/agent/heartbeat")) return new Response(null, { status: 204 });
+    if (url.endsWith("/runtimes/agent/commands/claim")) {
+      return Response.json({
+        command: {
+          id: "0123456789abcdef01234567",
+          operation: "app.proxy",
+          leaseToken: "L".repeat(43),
+          payload: {
+            appId: "test-app",
+            port: 3000,
+            path: "/index.html",
+            method: "GET",
+          },
+        },
+      });
+    }
+    return new Response(null, { status: 204 });
+  };
+  const client = new RuntimeAgentClient("https://mაგენტ.example.test", "T".repeat(43), fetchImpl);
+  const agent = new RuntimeAgent({
+    client,
+    version: "test-agent",
+    applicationEngine: {
+      execute: async () => ({ applicationId: "unused", status: "active" }),
+      proxyApplicationRequest: async (payload) => {
+        assert.deepEqual(payload, {
+          appId: "test-app",
+          port: 3000,
+          path: "/index.html",
+          method: "GET",
+        });
+        return {
+          applicationId: "test-app",
+          statusCode: 200,
+          contentType: "text/html",
+          body: Buffer.from("<main>ok</main>").toString("base64"),
+        };
+      },
+    },
+  });
+
+  assert.equal(await agent.runOnce(60_000), true);
+  assert.equal(requests[2]?.body?.status, "succeeded");
+  assert.deepEqual(requests[2]?.body?.result, {
+    applicationId: "test-app",
+    statusCode: 200,
+    contentType: "text/html",
+    body: Buffer.from("<main>ok</main>").toString("base64"),
+  });
+});
+
 test("Runtime Agent builds App Studio releases and forwards scoped GHCR credentials", async () => {
   const archive = Buffer.from("gzip archive").toString("base64");
   const projectId = "0123456789abcdef01234567";

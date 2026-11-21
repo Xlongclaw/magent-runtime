@@ -22,6 +22,7 @@ import {
 import {
   appStudioBuildPayloadSchema,
   appStudioCommandPayloadSchema,
+  applicationProxyPayloadSchema,
   workflowCodePayloadSchema,
 } from "@magent/runtime-protocol";
 
@@ -32,7 +33,7 @@ export interface RuntimeAgentOptions {
   version: string;
   applicationEngine?: Pick<PodmanApplicationEngine, "execute"> &
     Partial<Pick<PodmanApplicationEngine, "buildAppStudioImage" | "executeAppStudioCommand" | "executeWorkflowCode">> &
-    Partial<Pick<PodmanApplicationEngine, "inspect" | "logs" | "invokeMapAction" | "deliverMapEvent">>;
+    Partial<Pick<PodmanApplicationEngine, "inspect" | "logs" | "invokeMapAction" | "deliverMapEvent" | "proxyApplicationRequest">>;
   pollIntervalMs?: number;
   heartbeatIntervalMs?: number;
   mapProxyPort?: number;
@@ -47,7 +48,7 @@ export class RuntimeAgent {
   private mapProxyServer: Server | null = null;
   private readonly applicationEngine: Pick<PodmanApplicationEngine, "execute"> &
     Partial<Pick<PodmanApplicationEngine, "buildAppStudioImage" | "executeAppStudioCommand" | "executeWorkflowCode">> &
-    Partial<Pick<PodmanApplicationEngine, "inspect" | "logs" | "invokeMapAction" | "deliverMapEvent">>;
+    Partial<Pick<PodmanApplicationEngine, "inspect" | "logs" | "invokeMapAction" | "deliverMapEvent" | "proxyApplicationRequest">>;
 
   constructor(private readonly options: RuntimeAgentOptions) {
     this.pollIntervalMs = options.pollIntervalMs ?? 5_000;
@@ -122,6 +123,12 @@ export class RuntimeAgent {
           token,
           mapCommand.payload.event,
         );
+      } else if (command.operation === "app.proxy") {
+        const proxyCommand = parseApplicationProxyCommand(command);
+        if (!this.applicationEngine.proxyApplicationRequest) {
+          throw new Error("Application frontend proxying is not available.");
+        }
+        result = await this.applicationEngine.proxyApplicationRequest(proxyCommand.payload);
       } else if (command.operation === "appstudio.build") {
         const build = parseAppStudioBuildPayload(command.payload);
         if (!this.applicationEngine.buildAppStudioImage) {
@@ -315,6 +322,19 @@ function parseApplicationLogsCommand(command: {
       appId: command.payload.appId,
       tail: command.payload.tail,
     },
+  };
+}
+
+function parseApplicationProxyCommand(command: LeasedCommand) {
+  const parsed = applicationProxyPayloadSchema.safeParse(command.payload);
+  if (command.operation !== "app.proxy" || !parsed.success) {
+    throw new Error("Application frontend proxy command is invalid.");
+  }
+  return {
+    id: command.id,
+    leaseToken: command.leaseToken,
+    operation: "app.proxy" as const,
+    payload: parsed.data,
   };
 }
 
