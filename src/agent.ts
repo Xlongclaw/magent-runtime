@@ -51,7 +51,7 @@ export class RuntimeAgent {
     Partial<Pick<PodmanApplicationEngine, "inspect" | "logs" | "invokeMapAction" | "deliverMapEvent" | "proxyApplicationRequest">>;
 
   constructor(private readonly options: RuntimeAgentOptions) {
-    this.pollIntervalMs = options.pollIntervalMs ?? 5_000;
+    this.pollIntervalMs = options.pollIntervalMs ?? 250;
     this.heartbeatIntervalMs = options.heartbeatIntervalMs ?? 30_000;
     this.mapProxyPort = options.mapProxyPort ?? Number(process.env.MAGENT_MAP_PROXY_PORT ?? 4317);
     if (!Number.isInteger(this.mapProxyPort) || this.mapProxyPort < 1 || this.mapProxyPort > 65_535) {
