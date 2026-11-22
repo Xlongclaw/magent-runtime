@@ -180,7 +180,8 @@ test("App Studio terminal runs a temporary source copy in a rootless, networkles
     "--security-opt=no-new-privileges",
     "--pids-limit=64",
     "--memory=256m",
-    "--cpus=1",
+    "--cpu-period=100000",
+    "--cpu-quota=100000",
     "--tmpfs=/tmp:rw,noexec,nosuid,size=32m",
     "--tmpfs=/workspace:rw,noexec,nosuid,size=64m",
   ]) {
@@ -240,7 +241,8 @@ test("workflow code runs without network, host mounts, or elevated container pri
     "--security-opt=no-new-privileges",
     "--pids-limit=32",
     "--memory=128m",
-    "--cpus=1",
+    "--cpu-period=100000",
+    "--cpu-quota=100000",
     "--userns=keep-id",
   ]) {
     assert.ok(run.args.includes(requiredFlag), `missing workflow sandbox flag ${requiredFlag}`);
@@ -251,10 +253,13 @@ test("workflow code runs without network, host mounts, or elevated container pri
     executionId: "0123456789abcdef01234567",
     workflowId: "abcdefabcdefabcdefabcdef",
     nodeId: "code-1",
-    source: "return typeof process;",
-    context: { input: {}, nodes: {} },
+    source: "return { text: JSON.stringify(nodes[\"list-notes\"].output.notes, null, 2), process: typeof process };",
+    context: { input: {}, nodes: { "list-notes": { output: { notes: [{ title: "Test note" }] } } } },
   });
-  assert.equal(hiddenRuntimeState.output, "undefined");
+  assert.deepEqual(hiddenRuntimeState.output, {
+    text: '[\n  {\n    "title": "Test note"\n  }\n]',
+    process: "undefined",
+  });
 });
 
 test("Podman lifecycle uses rootless, isolated containers and preserves app storage", async () => {
