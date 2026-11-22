@@ -293,6 +293,7 @@ export class PodmanApplicationEngine {
     const { stdout } = await this.run(this.executable, [
       "run",
       "--rm",
+      "--interactive",
       "--timeout=15",
       "--network=none",
       "--read-only",

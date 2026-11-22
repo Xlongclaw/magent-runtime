@@ -234,6 +234,7 @@ test("workflow code runs without network, host mounts, or elevated container pri
   const run = calls.find(({ args }) => args[0] === "run");
   assert.ok(run);
   for (const requiredFlag of [
+    "--interactive",
     "--timeout=15",
     "--network=none",
     "--read-only",
