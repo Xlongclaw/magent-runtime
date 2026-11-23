@@ -33,6 +33,14 @@ test("runtime protocol validates the shared command operation set", () => {
   assert.equal(applicationProxyPayloadSchema.safeParse(proxyRequest).success, true);
   assert.equal(applicationProxyPayloadSchema.safeParse({
     ...proxyRequest,
+    origin: "https://magent.trabits.in",
+  }).success, true);
+  assert.equal(applicationProxyPayloadSchema.safeParse({
+    ...proxyRequest,
+    origin: "https://magent.trabits.in/path",
+  }).success, false);
+  assert.equal(applicationProxyPayloadSchema.safeParse({
+    ...proxyRequest,
     cookie: "im_session=opaque",
   }).success, true);
   assert.equal(applicationProxyPayloadSchema.safeParse({

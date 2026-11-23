@@ -157,6 +157,8 @@ export const applicationProxyPayloadSchema = z.object({
         !decodedPathname.split("/").some((segment) => segment === "." || segment === "..");
     }),
   method: z.enum(["GET", "HEAD", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"]),
+  origin: z.string().max(512).url()
+    .refine((value) => new URL(value).origin === value).optional(),
   contentType: z.string().max(256).optional(),
   cookie: z.string().max(8_192).optional(),
   body: z.string().max(1_000_000).optional(),

@@ -685,10 +685,12 @@ test("MAP containers use internal networks unless outbound access is explicitly 
       port: 4000,
       path: "/index.html",
       method: "GET",
+      origin: "https://magent.trabits.in",
       cookie: "im_session=opaque",
     });
     assert.equal(fetchUrl, "http://127.0.0.1:49153/index.html");
     assert.equal(fetchHeaders?.get("authorization"), null);
+    assert.equal(fetchHeaders?.get("origin"), "https://magent.trabits.in");
     assert.equal(fetchHeaders?.get("cookie"), "im_session=opaque");
     assert.deepEqual(frontend, {
       applicationId: appId,

@@ -437,6 +437,7 @@ export class PodmanApplicationEngine {
         method: request.method,
         ...(body && request.method !== "GET" && request.method !== "HEAD" ? { body: Uint8Array.from(body) } : {}),
         headers: {
+          ...(request.origin ? { origin: request.origin } : {}),
           ...(request.contentType ? { "content-type": request.contentType } : {}),
           ...(request.cookie ? { cookie: request.cookie } : {}),
         },
