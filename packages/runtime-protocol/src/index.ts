@@ -158,6 +158,7 @@ export const applicationProxyPayloadSchema = z.object({
     }),
   method: z.enum(["GET", "HEAD", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"]),
   contentType: z.string().max(256).optional(),
+  cookie: z.string().max(8_192).optional(),
   body: z.string().max(1_000_000).optional(),
 }).strict();
 export const applicationProxyResultSchema = z.object({
@@ -165,6 +166,7 @@ export const applicationProxyResultSchema = z.object({
   statusCode: z.number().int().min(100).max(599),
   contentType: z.string().max(256).optional(),
   location: z.string().max(4_096).optional(),
+  setCookies: z.array(z.string().max(4_096)).max(20).optional(),
   cacheControl: z.string().max(256).optional(),
   body: z.string().max(3_000_000),
 }).strict();

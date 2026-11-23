@@ -564,6 +564,7 @@ test("MAP containers use internal networks unless outbound access is explicitly 
         headers: {
           "content-type": "text/html; charset=utf-8",
           "cache-control": "no-store",
+          "set-cookie": "im_session=opaque; Path=/; HttpOnly; SameSite=Lax",
         },
       });
     }
@@ -684,13 +685,16 @@ test("MAP containers use internal networks unless outbound access is explicitly 
       port: 4000,
       path: "/index.html",
       method: "GET",
+      cookie: "im_session=opaque",
     });
     assert.equal(fetchUrl, "http://127.0.0.1:49153/index.html");
     assert.equal(fetchHeaders?.get("authorization"), null);
+    assert.equal(fetchHeaders?.get("cookie"), "im_session=opaque");
     assert.deepEqual(frontend, {
       applicationId: appId,
       statusCode: 200,
       contentType: "text/html; charset=utf-8",
+      setCookies: ["im_session=opaque; Path=/; HttpOnly; SameSite=Lax"],
       cacheControl: "no-store",
       body: Buffer.from("<main>frontend</main>").toString("base64"),
     });

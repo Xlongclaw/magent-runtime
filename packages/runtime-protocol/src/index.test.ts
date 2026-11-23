@@ -33,6 +33,10 @@ test("runtime protocol validates the shared command operation set", () => {
   assert.equal(applicationProxyPayloadSchema.safeParse(proxyRequest).success, true);
   assert.equal(applicationProxyPayloadSchema.safeParse({
     ...proxyRequest,
+    cookie: "im_session=opaque",
+  }).success, true);
+  assert.equal(applicationProxyPayloadSchema.safeParse({
+    ...proxyRequest,
     path: "//external.example",
   }).success, false);
   assert.equal(applicationProxyPayloadSchema.safeParse({
@@ -43,6 +47,7 @@ test("runtime protocol validates the shared command operation set", () => {
     applicationId: "demo-app",
     statusCode: 200,
     contentType: "text/html",
+    setCookies: ["im_session=opaque; Path=/; HttpOnly; SameSite=Lax"],
     body: Buffer.from("<main>ok</main>").toString("base64"),
   }).success, true);
 });

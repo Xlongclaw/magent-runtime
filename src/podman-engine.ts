@@ -436,11 +436,15 @@ export class PodmanApplicationEngine {
       const response = await fetch(target, {
         method: request.method,
         ...(body && request.method !== "GET" && request.method !== "HEAD" ? { body: Uint8Array.from(body) } : {}),
-        headers: request.contentType ? { "content-type": request.contentType } : {},
+        headers: {
+          ...(request.contentType ? { "content-type": request.contentType } : {}),
+          ...(request.cookie ? { cookie: request.cookie } : {}),
+        },
         redirect: "manual",
         signal: AbortSignal.timeout(20_000),
       });
       const responseBody = await readResponseBuffer(response, 2 * 1024 * 1024);
+      const setCookies = response.headers.getSetCookie();
       const result = {
         applicationId: request.appId,
         statusCode: response.status,
@@ -450,6 +454,7 @@ export class PodmanApplicationEngine {
         ...(response.headers.get("location")
           ? { location: response.headers.get("location")!.slice(0, 4_096) }
           : {}),
+        ...(setCookies.length > 0 ? { setCookies } : {}),
         ...(response.headers.get("cache-control")
           ? { cacheControl: response.headers.get("cache-control")!.slice(0, 256) }
           : {}),
